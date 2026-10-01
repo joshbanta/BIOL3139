@@ -28,10 +28,9 @@ table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid
 
 <section class="card">
 <h2>Submit your group data</h2>
-<div class="grid">
+<div class="grid2">
 <div><label for="groupNumber">Group number</label><select id="groupNumber"></select></div>
 <div><label for="groupSize">Number of students in your group</label><input id="groupSize" type="number" min="2" max="8" step="1" placeholder="e.g., 4"></div>
-<div><label for="memberNumber">Your member number</label><input id="memberNumber" type="number" min="1" max="8" step="1" placeholder="e.g., 2"><div class="small">Coordinate within your group so each person uses a different number: 1, 2, 3, etc.</div></div>
 </div>
 
 <div style="margin-top:14px">
@@ -46,7 +45,7 @@ table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid
 </div>
 <p class="small">Different entry order is fine. Matching is based on the complete numerical datasets for touched and untouched plants.</p>
 <button id="submitBtn" class="primary" disabled>Submit / update my entry</button>
-<button id="clearBtn" disabled>Delete my current entry</button>
+<button id="clearBtn" disabled>Delete my submission</button>
 <div id="submitStatus"></div>
 </section>
 
@@ -90,7 +89,7 @@ const COLLECTION_NAME="limaBeanTouch_Fall2026";
 const ALL_GROUPS=Array.from({length:20},(_,i)=>i+1);
 
 const el=id=>document.getElementById(id);
-const groupNumberEl=el("groupNumber"),groupSizeEl=el("groupSize"),memberNumberEl=el("memberNumber"),
+const groupNumberEl=el("groupNumber"),groupSizeEl=el("groupSize"),
 nicknameEl=el("nickname"),touchedDataEl=el("touchedData"),controlDataEl=el("controlData"),
 submitBtn=el("submitBtn"),clearBtn=el("clearBtn"),submitStatusEl=el("submitStatus"),
 connectionStatusEl=el("connectionStatus"),groupSummaryEl=el("groupSummary"),
@@ -144,8 +143,12 @@ function parseHeights(text,label){
  return values.map(v=>Number(v.toFixed(3))).sort((a,b)=>a-b);
 }
 
-function documentId(g,m){
- return"g"+String(g).padStart(2,"0")+"_m"+String(m).padStart(2,"0");
+function documentId(group,uid){
+ return "g"+String(group).padStart(2,"0")+"_u_"+uid;
+}
+
+function normalizeNickname(value){
+ return value.trim().replace(/\s+/g," ").toLowerCase();
 }
 
 submitBtn.addEventListener("click",async()=>{
@@ -155,7 +158,6 @@ submitBtn.addEventListener("click",async()=>{
  try{
   const group=Number(groupNumberEl.value);
   const expectedMembers=Number(groupSizeEl.value);
-  const memberNumber=Number(memberNumberEl.value);
   const nickname=nicknameEl.value.trim().replace(/\s+/g," ");
 
   if(!nickname){
@@ -173,31 +175,33 @@ submitBtn.addEventListener("click",async()=>{
   if(!Number.isInteger(expectedMembers)||expectedMembers<2||expectedMembers>8)
    throw new Error("Enter the total number of students in your group (2–8).");
 
-  if(!Number.isInteger(memberNumber)||memberNumber<1||memberNumber>expectedMembers)
-   throw new Error("Your member number must be between 1 and "+expectedMembers+".");
+  const duplicateNickname=liveSubmissions.find(s=>
+   s.group===group &&
+   s.ownerUid!==currentUser.uid &&
+   normalizeNickname(s.nickname||"")===normalizeNickname(nickname)
+  );
 
+  if(duplicateNickname){
+   throw new Error("Someone else in your group is already using that anonymous nickname. Choose a different fake name or fictional character.");
+  }
 
   const touched=parseHeights(touchedDataEl.value,"Touched plants");
   const control=parseHeights(controlDataEl.value,"Untouched plants");
 
-  const ref=doc(db,COLLECTION_NAME,documentId(group,memberNumber));
+  const ref=doc(db,COLLECTION_NAME,documentId(group,currentUser.uid));
   const existing=await getDoc(ref);
-
-  if(existing.exists()&&existing.data().ownerUid!==currentUser.uid)
-   throw new Error("That member slot is already being used by another device. Choose your own member number.");
 
   await setDoc(ref,{
    ownerUid:currentUser.uid,
    group,
    expectedMembers,
-   memberNumber,
    nickname,
    touched,
    control,
    updatedAt:serverTimestamp()
   });
 
-  submitStatusEl.innerHTML='<div class="status ok">Your anonymous entry as <strong>'+escapeHtml(nickname)+'</strong> (Group '+group+', member '+memberNumber+') was saved.</div>';
+  submitStatusEl.innerHTML='<div class="status ok">Your anonymous entry as <strong>'+escapeHtml(nickname)+'</strong> in Group '+group+' was saved.</div>';
  }catch(err){
   console.error(err);
   submitStatusEl.innerHTML='<div class="status bad">'+escapeHtml(err.message)+'</div>';
@@ -210,17 +214,11 @@ clearBtn.addEventListener("click",async()=>{
 
  try{
   const group=Number(groupNumberEl.value);
-  const memberNumber=Number(memberNumberEl.value);
 
-  if(!Number.isInteger(memberNumber)||memberNumber<1)
-   throw new Error("Enter your member number first.");
-
-  const ref=doc(db,COLLECTION_NAME,documentId(group,memberNumber));
+  const ref=doc(db,COLLECTION_NAME,documentId(group,currentUser.uid));
   const existing=await getDoc(ref);
 
-  if(!existing.exists())throw new Error("There is no saved entry in that slot.");
-  if(existing.data().ownerUid!==currentUser.uid)
-   throw new Error("That slot belongs to another device and cannot be deleted here.");
+  if(!existing.exists())throw new Error("You do not have a saved submission for this group on this browser.");
 
   await deleteDoc(ref);
   submitStatusEl.innerHTML='<div class="status ok">Your saved entry was deleted.</div>';
@@ -233,20 +231,74 @@ clearBtn.addEventListener("click",async()=>{
 function signatureOf(s){return JSON.stringify({touched:[...s.touched].sort((a,b)=>a-b),control:[...s.control].sort((a,b)=>a-b)})}
 function buildGroupStates(submissions){
  const byGroup=new Map();
- submissions.forEach(s=>{if(Number.isInteger(s.group)){if(!byGroup.has(s.group))byGroup.set(s.group,[]);byGroup.get(s.group).push(s)}});
+
+ submissions.forEach(s=>{
+  if(Number.isInteger(s.group)){
+   if(!byGroup.has(s.group))byGroup.set(s.group,[]);
+   byGroup.get(s.group).push(s);
+  }
+ });
+
  return ALL_GROUPS.map(group=>{
-  const rows=(byGroup.get(group)||[]).sort((a,b)=>a.memberNumber-b.memberNumber);
-  if(!rows.length)return{group,rows,status:"none",accepted:false,expectedMembers:null};
+  const rows=(byGroup.get(group)||[]).sort((a,b)=>
+   String(a.nickname||"").localeCompare(String(b.nickname||""))
+  );
+
+  if(!rows.length){
+   return{group,rows,status:"none",accepted:false,expectedMembers:null};
+  }
+
   const expectedSet=[...new Set(rows.map(r=>Number(r.expectedMembers)))];
-  if(expectedSet.length!==1||!Number.isInteger(expectedSet[0]))return{group,rows,status:"mismatch",accepted:false,expectedMembers:null,reason:"Group members entered different group sizes."};
-  const expectedMembers=expectedSet[0],memberSet=new Set(rows.map(r=>Number(r.memberNumber)));
-  const invalid=rows.some(r=>!Number.isInteger(r.memberNumber)||r.memberNumber<1||r.memberNumber>expectedMembers);
+
+  if(expectedSet.length!==1||!Number.isInteger(expectedSet[0])){
+   return{
+    group,rows,status:"mismatch",accepted:false,expectedMembers:null,
+    reason:"Group members entered different group sizes."
+   };
+  }
+
+  const expectedMembers=expectedSet[0];
+  const normalizedNames=rows.map(r=>normalizeNickname(r.nickname||""));
+  const nicknameSet=new Set(normalizedNames);
+  const missingNickname=normalizedNames.some(n=>!n);
   const signatures=[...new Set(rows.map(signatureOf))];
-  if(invalid||memberSet.size!==rows.length||rows.length>expectedMembers)return{group,rows,status:"mismatch",accepted:false,expectedMembers,reason:"Member-number entries are inconsistent with the reported group size."};
-  if(signatures.length>1)return{group,rows,status:"mismatch",accepted:false,expectedMembers,reason:"Submitted height datasets do not match. Every member should check and re-enter the complete touched and untouched lists."};
-  const allSlots=Array.from({length:expectedMembers},(_,i)=>i+1).every(m=>memberSet.has(m));
-  if(rows.length<expectedMembers||!allSlots)return{group,rows,status:"waiting",accepted:false,expectedMembers};
-  return{group,rows,status:"accepted",accepted:true,expectedMembers,data:{touched:[...rows[0].touched],control:[...rows[0].control]}};
+
+  if(missingNickname){
+   return{
+    group,rows,status:"mismatch",accepted:false,expectedMembers,
+    reason:"One or more submissions are missing an anonymous nickname. Re-submit using a fake name or fictional character."
+   };
+  }
+
+  if(nicknameSet.size!==rows.length){
+   return{
+    group,rows,status:"mismatch",accepted:false,expectedMembers,
+    reason:"Two submissions are using the same anonymous nickname. Each student in the group must use a different fake name or fictional character."
+   };
+  }
+
+  if(rows.length>expectedMembers){
+   return{
+    group,rows,status:"mismatch",accepted:false,expectedMembers,
+    reason:"More submissions were received than the reported number of students in this group. Check the group size and remove any accidental duplicate submissions."
+   };
+  }
+
+  if(signatures.length>1){
+   return{
+    group,rows,status:"mismatch",accepted:false,expectedMembers,
+    reason:"Submitted height datasets do not match. Every group member should check the measurements and re-enter the complete touched and untouched lists."
+   };
+  }
+
+  if(rows.length<expectedMembers){
+   return{group,rows,status:"waiting",accepted:false,expectedMembers};
+  }
+
+  return{
+   group,rows,status:"accepted",accepted:true,expectedMembers,
+   data:{touched:[...rows[0].touched],control:[...rows[0].control]}
+  };
  });
 }
 
@@ -295,7 +347,7 @@ function renderGroups(states){
   if(s.status==="accepted")status='<strong style="color:#1b5e20">Accepted</strong>';
   else if(s.status==="waiting")status='<strong style="color:#7a5300">Waiting for all members</strong>';
   else status='<strong style="color:#8e1b1b">Mismatch — excluded</strong><br><span class="small">'+escapeHtml(s.reason||"Re-enter the complete data until all entries agree.")+"</span>";
-  const names=s.rows.map(r=>r.nickname?escapeHtml(r.nickname):("Member "+r.memberNumber)).join(", ");
+  const names=s.rows.map(r=>r.nickname?escapeHtml(r.nickname):"Anonymous submission").join(", ");
   h+="<tr><td>Group "+s.group+"</td><td>"+names+"</td><td>"+s.rows.length+"/"+(s.expectedMembers??"?")+"</td><td>"+status+"</td></tr>";
  });
  groupSummaryEl.innerHTML=h+"</tbody></table>";
