@@ -71,7 +71,7 @@ table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid
 <h3 style="margin-top:24px">Touched vs. untouched height</h3>
 <div id="graphGate" class="note">Your group's graph will unlock only after your own group submission is present and the group has been accepted.</div>
 <div id="graphArea" hidden>
-<p class="small">Bars show mean height. Error bars are ±1 standard error. The current t-test P-value and your accepted group number are printed on the graph.</p>
+<p class="small">Bars show mean height. Error bars are ±1 standard error. The current t-test P-value, your accepted group number, and the total number of accepted groups included in the class analysis are printed on the graph.</p>
 <div class="chart-wrap"><canvas id="chartCanvas"></canvas></div>
 <button id="downloadChartBtn" disabled>Download graph as PNG</button>
 </div>
@@ -465,9 +465,10 @@ function renderGraphGate(allStates,touched,control,pValue){
   return;
  }
 
+ const acceptedGroupCount=allStates.filter(g=>g.accepted).length;
  graphGateEl.hidden=true;
  graphAreaEl.hidden=false;
- updateChart(touched,control,pValue,selectedGroup);
+ updateChart(touched,control,pValue,selectedGroup,acceptedGroupCount);
 }
 
 const whiteBg={id:"whiteBackground",beforeDraw(chart){const{ctx,width,height}=chart;ctx.save();ctx.globalCompositeOperation="destination-over";ctx.fillStyle="white";ctx.fillRect(0,0,width,height);ctx.restore()}};
@@ -489,7 +490,7 @@ const pValuePlugin={
  }
 };
 
-function updateChart(touched,control,pValue,groupNumber){
+function updateChart(touched,control,pValue,groupNumber,acceptedGroupCount){
  if(chart){chart.destroy();chart=null}
  if(!touched.length||!control.length){downloadChartBtn.disabled=true;return}
  currentGraphGroup=groupNumber;
@@ -520,7 +521,10 @@ function updateChart(touched,control,pValue,groupNumber){
     title:{display:true,text:"Lima bean height: touched vs. untouched"},
     subtitle:{
      display:true,
-     text:"Group "+groupNumber+" data are included in this class analysis.",
+     text:[
+      "Group "+groupNumber+" data are included in this class analysis.",
+      "Total accepted groups included: "+acceptedGroupCount
+     ],
      font:{weight:"bold",size:14},
      padding:{bottom:12}
     },
