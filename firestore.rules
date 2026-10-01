@@ -3,25 +3,34 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    function isInstructor() {
+      return request.auth != null
+             && request.auth.token.email == "jbanta@uttyler.edu";
+    }
+
     match /limaBeanTouch_Fall2026/{submissionId} {
 
-      // All students using the app are anonymously authenticated.
-      // They may read the class data so everyone sees the live analysis.
+      // Authenticated students and the instructor may read the class data
+      // so the live class analysis and instructor dashboard can function.
       allow read: if request.auth != null;
 
       // A student may create only a record owned by their anonymous account.
       allow create: if request.auth != null
                     && request.resource.data.ownerUid == request.auth.uid;
 
-      // A student may change only the record they originally created,
+      // A student may change only the record they originally created
       // and may not transfer ownership to another account.
       allow update: if request.auth != null
                     && resource.data.ownerUid == request.auth.uid
                     && request.resource.data.ownerUid == request.auth.uid;
 
-      // A student may delete only the record they originally created.
+      // Students may delete their own records. The authenticated instructor
+      // account may delete any submission for group or class resets.
       allow delete: if request.auth != null
-                    && resource.data.ownerUid == request.auth.uid;
+                    && (
+                      resource.data.ownerUid == request.auth.uid
+                      || isInstructor()
+                    );
     }
   }
 }
