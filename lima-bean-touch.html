@@ -14,7 +14,7 @@ main{max-width:1050px;margin:auto;padding:24px 18px 50px}h1,h2,h3{line-height:1.
 .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
 label{display:block;font-weight:700;margin-bottom:5px}input,textarea,select,button{font:inherit}input,textarea,select{width:100%;border:1px solid #aaa;border-radius:6px;padding:9px 10px;background:#fff}
 textarea{min-height:155px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}button{border:1px solid #555;border-radius:7px;padding:9px 14px;cursor:pointer;background:#f2f2f2;margin:4px 6px 4px 0}.primary{background:#222;color:#fff;border-color:#222}button:disabled{opacity:.5;cursor:not-allowed}
-.small{color:var(--muted);font-size:.92rem}
+.small{color:var(--muted);font-size:.92rem}.confirm-row{display:flex;gap:10px;align-items:flex-start;margin:14px 0}.confirm-row input[type="checkbox"]{width:auto;margin-top:4px;flex:0 0 auto}.confirm-row label{font-weight:600;margin:0}[hidden]{display:none!important}
 table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid var(--border);padding:8px;text-align:left;vertical-align:top}th{background:#f1f1f1}.num{text-align:right;font-variant-numeric:tabular-nums}
 .chart-wrap{max-width:760px;margin:auto}#chartCanvas{width:100%;max-height:520px}
 @media(max-width:760px){.grid,.grid2{grid-template-columns:1fr}th,td{font-size:.9rem}}
@@ -44,6 +44,12 @@ table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid
 <div><label for="controlData">Untouched plants — height (cm)</label><textarea id="controlData" placeholder="One height per line, or separate values with commas/spaces."></textarea></div>
 </div>
 <p class="small">Different entry order is fine. Matching is based on the complete numerical datasets for touched and untouched plants.</p>
+
+<div class="confirm-row">
+<input id="confirmConsensus" type="checkbox">
+<label for="confirmConsensus">I have conferred with my group and confirmed both the number of students in our group and the complete touched and untouched datasets.</label>
+</div>
+
 <button id="submitBtn" class="primary" disabled>Submit / update my entry</button>
 <button id="clearBtn" disabled>Delete my submission</button>
 <div id="submitStatus"></div>
@@ -63,9 +69,12 @@ table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid
 <div id="testOutput">Not enough data yet.</div>
 <div class="note"><strong>Decision rule:</strong> use α = 0.05. If P &lt; 0.05, reject the null hypothesis. If P ≥ 0.05, fail to reject the null hypothesis.</div>
 <h3 style="margin-top:24px">Touched vs. untouched height</h3>
-<p class="small">Bars show mean height. Error bars are ±1 standard error. The current t-test P-value is printed on the graph.</p>
+<div id="graphGate" class="note">Your group's graph will unlock only after your own group submission is present and the group has been accepted.</div>
+<div id="graphArea" hidden>
+<p class="small">Bars show mean height. Error bars are ±1 standard error. The current t-test P-value and your accepted group number are printed on the graph.</p>
 <div class="chart-wrap"><canvas id="chartCanvas"></canvas></div>
 <button id="downloadChartBtn" disabled>Download graph as PNG</button>
+</div>
 </section>
 </main>
 
@@ -91,13 +100,16 @@ const ALL_GROUPS=Array.from({length:20},(_,i)=>i+1);
 const el=id=>document.getElementById(id);
 const groupNumberEl=el("groupNumber"),groupSizeEl=el("groupSize"),
 nicknameEl=el("nickname"),touchedDataEl=el("touchedData"),controlDataEl=el("controlData"),
+confirmConsensusEl=el("confirmConsensus"),
 submitBtn=el("submitBtn"),clearBtn=el("clearBtn"),submitStatusEl=el("submitStatus"),
 connectionStatusEl=el("connectionStatus"),groupSummaryEl=el("groupSummary"),
-analysisSummaryEl=el("analysisSummary"),testOutputEl=el("testOutput"),downloadChartBtn=el("downloadChartBtn");
+analysisSummaryEl=el("analysisSummary"),testOutputEl=el("testOutput"),
+graphGateEl=el("graphGate"),graphAreaEl=el("graphArea"),downloadChartBtn=el("downloadChartBtn");
 
 ALL_GROUPS.forEach(g=>{const o=document.createElement("option");o.value=g;o.textContent="Group "+g;groupNumberEl.appendChild(o)});
+groupNumberEl.addEventListener("change",()=>renderAll());
 
-let db=null,auth=null,currentUser=null,unsubscribe=null,liveSubmissions=[],chart=null;
+let db=null,auth=null,currentUser=null,unsubscribe=null,liveSubmissions=[],chart=null,currentGraphGroup=null;
 
 try{
  const app=initializeApp(firebaseConfig);
@@ -175,6 +187,10 @@ submitBtn.addEventListener("click",async()=>{
   if(!Number.isInteger(expectedMembers)||expectedMembers<2||expectedMembers>8)
    throw new Error("Enter the total number of students in your group (2–8).");
 
+  if(!confirmConsensusEl.checked){
+   throw new Error("Before submitting, confer with your group and check the confirmation box to verify the group size and complete dataset.");
+  }
+
   const duplicateNickname=liveSubmissions.find(s=>
    s.group===group &&
    s.ownerUid!==currentUser.uid &&
@@ -196,12 +212,14 @@ submitBtn.addEventListener("click",async()=>{
    group,
    expectedMembers,
    nickname,
+   confirmedConsensus:true,
    touched,
    control,
    updatedAt:serverTimestamp()
   });
 
-  submitStatusEl.innerHTML='<div class="status ok">Your anonymous entry as <strong>'+escapeHtml(nickname)+'</strong> in Group '+group+' was saved.</div>';
+  confirmConsensusEl.checked=false;
+  submitStatusEl.innerHTML='<div class="status ok">Your anonymous entry as <strong>'+escapeHtml(nickname)+'</strong> in Group '+group+' was saved. If your group is not accepted, confer with your group and correct any disagreement.</div>';
  }catch(err){
   console.error(err);
   submitStatusEl.innerHTML='<div class="status bad">'+escapeHtml(err.message)+'</div>';
@@ -253,7 +271,7 @@ function buildGroupStates(submissions){
   if(expectedSet.length!==1||!Number.isInteger(expectedSet[0])){
    return{
     group,rows,status:"mismatch",accepted:false,expectedMembers:null,
-    reason:"Group members entered different group sizes."
+    reason:"CONFER WITH YOUR GROUP — the reported group size does not match. Determine the correct number of students together, then each person with an incorrect entry must update and resubmit it."
    };
   }
 
@@ -287,7 +305,7 @@ function buildGroupStates(submissions){
   if(signatures.length>1){
    return{
     group,rows,status:"mismatch",accepted:false,expectedMembers,
-    reason:"Submitted height datasets do not match. Every group member should check the measurements and re-enter the complete touched and untouched lists."
+    reason:"CONFER WITH YOUR GROUP — the submitted height datasets do not match. Compare the complete touched and untouched lists together, then each person with an incorrect entry must update and resubmit it."
    };
   }
 
@@ -336,35 +354,59 @@ function twoSampleTTest(touched,control){
 
 function renderAll(){
  const states=buildGroupStates(liveSubmissions);
- renderGroups(states);renderAnalysis(states.filter(g=>g.accepted));
+ renderGroups(states);
+ renderAnalysis(states);
 }
 function renderGroups(states){
  const active=states.filter(s=>s.rows.length);
  if(!active.length){groupSummaryEl.textContent="No submissions yet.";return}
- let h="<table><thead><tr><th>Group</th><th>Anonymous nicknames submitted</th><th>Submissions</th><th>Status</th></tr></thead><tbody>";
+
+ let h="<table><thead><tr><th>Group</th><th>Anonymous nickname</th><th>Group size each person reported</th><th>Submissions</th><th>Status</th></tr></thead><tbody>";
+
  active.forEach(s=>{
   let status="";
-  if(s.status==="accepted")status='<strong style="color:#1b5e20">Accepted</strong>';
-  else if(s.status==="waiting")status='<strong style="color:#7a5300">Waiting for all members</strong>';
-  else status='<strong style="color:#8e1b1b">Mismatch — excluded</strong><br><span class="small">'+escapeHtml(s.reason||"Re-enter the complete data until all entries agree.")+"</span>";
-  const names=s.rows.map(r=>r.nickname?escapeHtml(r.nickname):"Anonymous submission").join(", ");
-  h+="<tr><td>Group "+s.group+"</td><td>"+names+"</td><td>"+s.rows.length+"/"+(s.expectedMembers??"?")+"</td><td>"+status+"</td></tr>";
+
+  if(s.status==="accepted"){
+   status='<strong style="color:#1b5e20">Accepted</strong>';
+  }else if(s.status==="waiting"){
+   status='<strong style="color:#7a5300">Waiting for all members</strong><br><span class="small">Everyone should confer and make sure the group size and complete dataset are correct before the remaining submissions are made.</span>';
+  }else{
+   status='<strong style="color:#8e1b1b">Mismatch — excluded</strong><br><span class="small">'+
+    escapeHtml(s.reason||"Confer with your group and correct the submissions until all entries agree.")+
+    "</span>";
+  }
+
+  const names=s.rows.map(r=>r.nickname?escapeHtml(r.nickname):"Anonymous submission").join("<br>");
+  const reports=s.rows.map(r=>
+   (r.nickname?escapeHtml(r.nickname):"Anonymous submission")+": <strong>"+
+   escapeHtml(Number.isInteger(Number(r.expectedMembers))?Number(r.expectedMembers):"?")+
+   "</strong>"
+  ).join("<br>");
+
+  const submissionCount=s.expectedMembers==null
+   ?s.rows.length+" submitted"
+   :s.rows.length+"/"+s.expectedMembers;
+
+  h+="<tr><td>Group "+s.group+"</td><td>"+names+"</td><td>"+reports+"</td><td>"+submissionCount+"</td><td>"+status+"</td></tr>";
  });
+
  groupSummaryEl.innerHTML=h+"</tbody></table>";
 }
-function renderAnalysis(states){
- if(!states.length){
+function renderAnalysis(allStates){
+ const acceptedStates=allStates.filter(g=>g.accepted);
+
+ if(!acceptedStates.length){
   analysisSummaryEl.textContent="Waiting for at least one accepted group.";
   testOutputEl.textContent="Not enough data yet.";
-  updateChart([],[],null);
+  renderGraphGate(allStates,[],[],null);
   return;
  }
 
- const touched=states.flatMap(g=>g.data.touched);
- const control=states.flatMap(g=>g.data.control);
+ const touched=acceptedStates.flatMap(g=>g.data.touched);
+ const control=acceptedStates.flatMap(g=>g.data.control);
 
  analysisSummaryEl.innerHTML=
-  "<strong>"+states.length+"</strong> accepted groups are currently included ("+
+  "<strong>"+acceptedStates.length+"</strong> accepted groups are currently included ("+
   "<strong>"+touched.length+"</strong> touched plant measurements; "+
   "<strong>"+control.length+"</strong> untouched plant measurements). "+
   "Results update automatically whenever a group becomes accepted or a saved entry changes.";
@@ -373,7 +415,7 @@ function renderAnalysis(states){
 
  if(!result){
   testOutputEl.textContent="At least two touched and two untouched measurements are needed for the t-test.";
-  updateChart(touched,control,null);
+  renderGraphGate(allStates,touched,control,null);
   return;
  }
 
@@ -391,7 +433,41 @@ function renderAnalysis(states){
   "<tr><th>Decision</th><td>"+decision+"</td></tr>"+
   "</tbody></table>";
 
- updateChart(touched,control,result.p);
+ renderGraphGate(allStates,touched,control,result.p);
+}
+
+function renderGraphGate(allStates,touched,control,pValue){
+ const selectedGroup=Number(groupNumberEl.value);
+ const groupState=allStates.find(g=>g.group===selectedGroup);
+ const ownSubmission=currentUser
+  ?liveSubmissions.find(s=>s.group===selectedGroup&&s.ownerUid===currentUser.uid)
+  :null;
+
+ const allowed=Boolean(ownSubmission&&groupState&&groupState.accepted);
+
+ if(!allowed){
+  if(chart){chart.destroy();chart=null}
+  currentGraphGroup=null;
+  graphAreaEl.hidden=true;
+  downloadChartBtn.disabled=true;
+  graphGateEl.hidden=false;
+
+  if(!ownSubmission){
+   graphGateEl.className="note";
+   graphGateEl.innerHTML="<strong>Graph locked.</strong> Submit your own entry for Group "+selectedGroup+". The graph will unlock only after your submission is present and the entire group is Accepted.";
+  }else if(groupState&&groupState.status==="waiting"){
+   graphGateEl.className="status warn";
+   graphGateEl.innerHTML="<strong>Graph locked for Group "+selectedGroup+".</strong> Your submission is present, but the group is still waiting for all members. Confer with your group and make sure everyone submits the same group size and complete dataset.";
+  }else{
+   graphGateEl.className="status bad";
+   graphGateEl.innerHTML="<strong>Graph locked for Group "+selectedGroup+".</strong> Your group has a mismatch and is excluded. Confer with your group, correct the conflicting entries, and resubmit until the group is Accepted.";
+  }
+  return;
+ }
+
+ graphGateEl.hidden=true;
+ graphAreaEl.hidden=false;
+ updateChart(touched,control,pValue,selectedGroup);
 }
 
 const whiteBg={id:"whiteBackground",beforeDraw(chart){const{ctx,width,height}=chart;ctx.save();ctx.globalCompositeOperation="destination-over";ctx.fillStyle="white";ctx.fillRect(0,0,width,height);ctx.restore()}};
@@ -413,9 +489,10 @@ const pValuePlugin={
  }
 };
 
-function updateChart(touched,control,pValue){
+function updateChart(touched,control,pValue,groupNumber){
  if(chart){chart.destroy();chart=null}
  if(!touched.length||!control.length){downloadChartBtn.disabled=true;return}
+ currentGraphGroup=groupNumber;
 
  const data=[mean(touched),mean(control)];
  const errors=[se(touched),se(control)];
@@ -441,6 +518,12 @@ function updateChart(touched,control,pValue){
    animation:false,
    plugins:{
     title:{display:true,text:"Lima bean height: touched vs. untouched"},
+    subtitle:{
+     display:true,
+     text:"Group "+groupNumber+" data are included in this class analysis.",
+     font:{weight:"bold",size:14},
+     padding:{bottom:12}
+    },
     legend:{display:false},
     pValue:{p:pValue},
     tooltip:{callbacks:{label:context=>{
@@ -457,7 +540,13 @@ function updateChart(touched,control,pValue){
  });
  downloadChartBtn.disabled=false;
 }
-downloadChartBtn.addEventListener("click",()=>{if(!chart)return;const a=document.createElement("a");a.download="lima_bean_touched_vs_untouched.png";a.href=chart.toBase64Image("image/png",1);a.click()});
+downloadChartBtn.addEventListener("click",()=>{
+ if(!chart||currentGraphGroup==null)return;
+ const a=document.createElement("a");
+ a.download="lima_bean_group_"+currentGraphGroup+"_class_results.png";
+ a.href=chart.toBase64Image("image/png",1);
+ a.click();
+});
 
 function formatStat(x){
  if(x===Infinity)return"∞";
