@@ -64,33 +64,25 @@ table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid
 </main>
 
 <script type="module">
-import{initializeApp}from"https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
-import{getAuth,signInAnonymously,onAuthStateChanged}from"https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
-import{getFirestore,collection,doc,setDoc,deleteDoc,getDoc,onSnapshot,serverTimestamp}from"https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
+import{createClient}from"https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
 
 /* =========================================================
    INSTRUCTOR CONFIGURATION
    =========================================================
-   GitHub Pages hosts this front end. Firebase Firestore supplies
-   the shared writable database required for live class results.
-
-   Paste the Firebase web-app config below after creating the project.
+   Supabase supplies the shared database. These two values are
+   safe to use in browser code when Row Level Security is enabled.
+   ChatGPT will replace them after the Supabase project is connected.
 */
-const firebaseConfig={
- apiKey:"PASTE_FIREBASE_API_KEY_HERE",
- authDomain:"PASTE_PROJECT_ID.firebaseapp.com",
- projectId:"PASTE_PROJECT_ID_HERE",
- storageBucket:"PASTE_PROJECT_ID.firebasestorage.app",
- messagingSenderId:"PASTE_MESSAGING_SENDER_ID_HERE",
- appId:"PASTE_APP_ID_HERE"
-};
+const SUPABASE_URL="PASTE_SUPABASE_URL_HERE";
+const SUPABASE_ANON_KEY="PASTE_SUPABASE_ANON_KEY_HERE";
+const TABLE_NAME="lima_bean_submissions";
+const EXPERIMENT_ID="lima-bean-touch-fall-2026";
 
-const COLLECTION_NAME="limaBeanTouch_Fall2026";
-
-/* Provisional rack mapping from the class description:
-   Tuesday groups 1–10 = all top + first half of middle;
-   Wednesday groups 11–20 = second half of middle + all bottom.
-   Change only these arrays if the physical shelf boundaries differ. */
+/* Provisional physical rack mapping:
+   Groups 1–7 = Top
+   Groups 8–13 = Middle
+   Groups 14–20 = Bottom
+   Change only these arrays if the actual shelf breaks differ. */
 const TOP_GROUPS=[1,2,3,4,5,6,7];
 const MIDDLE_GROUPS=[8,9,10,11,12,13];
 const BOTTOM_GROUPS=[14,15,16,17,18,19,20];
@@ -114,38 +106,54 @@ ALL_GROUPS.forEach(g=>{const o=document.createElement("option");o.value=g;o.text
 function updateShelf(){const g=Number(groupNumberEl.value),s=shelfForGroup(g);shelfDisplayEl.textContent=s?s+" shelf":"Group not mapped"}
 groupNumberEl.addEventListener("change",updateShelf);updateShelf();
 
-let db=null,auth=null,currentUser=null,unsubscribe=null,liveSubmissions=[],chart=null;
-const configReady=firebaseConfig.apiKey&&!firebaseConfig.apiKey.includes("PASTE_")&&firebaseConfig.projectId&&!firebaseConfig.projectId.includes("PASTE_");
+let supabase=null,currentUser=null,liveSubmissions=[],chart=null,realtimeChannel=null;
+const configReady=!SUPABASE_URL.includes("PASTE_")&&!SUPABASE_ANON_KEY.includes("PASTE_");
 
 if(!configReady){
  connectionStatusEl.className="status bad";
- connectionStatusEl.textContent="Instructor setup required: Firebase has not yet been connected to this page.";
+ connectionStatusEl.textContent="Instructor setup is almost complete. The shared Supabase database has not yet been connected to this page.";
 }else{
+ await initializeDatabase();
+}
+
+async function initializeDatabase(){
  try{
-  const app=initializeApp(firebaseConfig);db=getFirestore(app);auth=getAuth(app);
-  onAuthStateChanged(auth,user=>{
-   if(user){
-    currentUser=user;submitBtn.disabled=false;clearBtn.disabled=false;
-    connectionStatusEl.className="status ok";
-    connectionStatusEl.textContent="Connected. Class results update automatically as accepted group data arrive.";
-    startRealtime();
-   }
-  });
-  await signInAnonymously(auth);
+  supabase=createClient(SUPABASE_URL,SUPABASE_ANON_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:false}});
+  let{data:{session},error:sessionErr}=await supabase.auth.getSession();
+  if(sessionErr)throw sessionErr;
+  if(!session){
+   const{data,error}=await supabase.auth.signInAnonymously();
+   if(error)throw error;
+   session=data.session;
+  }
+  currentUser=session.user;
+  submitBtn.disabled=false;clearBtn.disabled=false;
+  connectionStatusEl.className="status ok";
+  connectionStatusEl.textContent="Connected. Class results update automatically as accepted group data arrive.";
+  await refreshSubmissions();
+  subscribeRealtime();
  }catch(err){
   console.error(err);connectionStatusEl.className="status bad";
   connectionStatusEl.textContent="Could not connect to the class database: "+err.message;
  }
 }
 
-function startRealtime(){
- if(!db||unsubscribe)return;
- unsubscribe=onSnapshot(collection(db,COLLECTION_NAME),snap=>{
-  liveSubmissions=snap.docs.map(d=>({id:d.id,...d.data()}));renderAll();
- },err=>{
-  console.error(err);connectionStatusEl.className="status bad";
-  connectionStatusEl.textContent="Database read error: "+err.message;
- });
+async function refreshSubmissions(){
+ const{data,error}=await supabase.from(TABLE_NAME).select("id,owner_id,experiment_id,group_number,shelf,expected_members,member_number,touched,control,updated_at").eq("experiment_id",EXPERIMENT_ID).order("group_number").order("member_number");
+ if(error)throw error;
+ liveSubmissions=(data||[]).map(r=>({
+  id:r.id,ownerUid:r.owner_id,group:r.group_number,shelf:r.shelf,
+  expectedMembers:r.expected_members,memberNumber:r.member_number,
+  touched:(r.touched||[]).map(Number),control:(r.control||[]).map(Number),updatedAt:r.updated_at
+ }));
+ renderAll();
+}
+
+function subscribeRealtime(){
+ if(realtimeChannel)return;
+ realtimeChannel=supabase.channel("lima-bean-live")
+  .on("postgres_changes",{event:"*",schema:"public",table:TABLE_NAME,filter:"experiment_id=eq."+EXPERIMENT_ID},async()=>{try{await refreshSubmissions()}catch(e){console.error(e)}})
+  .subscribe();
 }
 
 function parseHeights(text,label){
@@ -155,33 +163,56 @@ function parseHeights(text,label){
  if(values.some(v=>v<0||v>300))throw new Error(label+": a height is outside 0–300 cm.");
  return values.map(v=>Number(v.toFixed(3))).sort((a,b)=>a-b);
 }
-function documentId(g,m){return"g"+String(g).padStart(2,"0")+"_m"+String(m).padStart(2,"0")}
 
 submitBtn.addEventListener("click",async()=>{
- submitStatusEl.innerHTML="";
- if(!db||!currentUser)return;
+ submitStatusEl.innerHTML="";if(!supabase||!currentUser)return;
  try{
   const group=Number(groupNumberEl.value),expectedMembers=Number(groupSizeEl.value),memberNumber=Number(memberNumberEl.value),shelf=shelfForGroup(group);
   if(!Number.isInteger(expectedMembers)||expectedMembers<2||expectedMembers>8)throw new Error("Enter the total number of students in your group (2–8).");
   if(!Number.isInteger(memberNumber)||memberNumber<1||memberNumber>expectedMembers)throw new Error("Your member number must be between 1 and "+expectedMembers+".");
   if(!shelf)throw new Error("This group is not mapped to a shelf.");
   const touched=parseHeights(touchedDataEl.value,"Touched plants"),control=parseHeights(controlDataEl.value,"Control plants");
-  const ref=doc(db,COLLECTION_NAME,documentId(group,memberNumber)),existing=await getDoc(ref);
-  if(existing.exists()&&existing.data().ownerUid!==currentUser.uid)throw new Error("That member slot is already being used by another device. Choose your own member number.");
-  await setDoc(ref,{ownerUid:currentUser.uid,group,shelf,expectedMembers,memberNumber,touched,control,updatedAt:serverTimestamp()});
+
+  const{data:existing,error:findErr}=await supabase.from(TABLE_NAME)
+   .select("id,owner_id").eq("experiment_id",EXPERIMENT_ID).eq("group_number",group).eq("member_number",memberNumber).maybeSingle();
+  if(findErr)throw findErr;
+
+  if(existing&&existing.owner_id!==currentUser.id)throw new Error("That member slot is already being used by another device. Choose your own member number.");
+
+  if(existing){
+   const{error}=await supabase.from(TABLE_NAME).update({
+    shelf,expected_members:expectedMembers,touched,control,updated_at:new Date().toISOString()
+   }).eq("id",existing.id).eq("owner_id",currentUser.id);
+   if(error)throw error;
+  }else{
+   const{error}=await supabase.from(TABLE_NAME).insert({
+    owner_id:currentUser.id,experiment_id:EXPERIMENT_ID,group_number:group,shelf,
+    expected_members:expectedMembers,member_number:memberNumber,touched,control
+   });
+   if(error){
+    if(error.code==="23505")throw new Error("That group/member slot was just claimed by another student. Choose your own member number.");
+    throw error;
+   }
+  }
   submitStatusEl.innerHTML='<div class="status ok">Your Group '+group+', member '+memberNumber+' entry was saved.</div>';
+  await refreshSubmissions();
  }catch(err){console.error(err);submitStatusEl.innerHTML='<div class="status bad">'+escapeHtml(err.message)+'</div>'}
 });
 
 clearBtn.addEventListener("click",async()=>{
- submitStatusEl.innerHTML="";if(!db||!currentUser)return;
+ submitStatusEl.innerHTML="";if(!supabase||!currentUser)return;
  try{
   const group=Number(groupNumberEl.value),memberNumber=Number(memberNumberEl.value);
   if(!Number.isInteger(memberNumber)||memberNumber<1)throw new Error("Enter your member number first.");
-  const ref=doc(db,COLLECTION_NAME,documentId(group,memberNumber)),existing=await getDoc(ref);
-  if(!existing.exists())throw new Error("There is no saved entry in that slot.");
-  if(existing.data().ownerUid!==currentUser.uid)throw new Error("That slot belongs to another device and cannot be deleted here.");
-  await deleteDoc(ref);submitStatusEl.innerHTML='<div class="status ok">Your saved entry was deleted.</div>';
+  const{data:existing,error:findErr}=await supabase.from(TABLE_NAME)
+   .select("id,owner_id").eq("experiment_id",EXPERIMENT_ID).eq("group_number",group).eq("member_number",memberNumber).maybeSingle();
+  if(findErr)throw findErr;
+  if(!existing)throw new Error("There is no saved entry in that slot.");
+  if(existing.owner_id!==currentUser.id)throw new Error("That slot belongs to another device and cannot be deleted here.");
+  const{error}=await supabase.from(TABLE_NAME).delete().eq("id",existing.id).eq("owner_id",currentUser.id);
+  if(error)throw error;
+  submitStatusEl.innerHTML='<div class="status ok">Your saved entry was deleted.</div>';
+  await refreshSubmissions();
  }catch(err){console.error(err);submitStatusEl.innerHTML='<div class="status bad">'+escapeHtml(err.message)+'</div>'}
 });
 
