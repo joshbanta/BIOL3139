@@ -23,7 +23,7 @@ table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid
 <body>
 <main>
 <h1>Lima Bean Touch Experiment</h1>
-<p>Enter the complete height data for your group. Every member should enter the same complete dataset independently. Measurement order does not matter. A group enters the class analysis only after all expected group members have submitted matching data.</p>
+<p>Enter the complete height data for your group. Every member should enter the same complete dataset independently. Measurement order does not matter. A group enters the class analysis only after all expected group members have submitted matching data. <strong>Do not enter your real name anywhere on this page.</strong></p>
 <div id="connectionStatus" class="status warn">Connecting to the class database…</div>
 
 <section class="card">
@@ -33,6 +33,13 @@ table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid
 <div><label for="groupSize">Number of students in your group</label><input id="groupSize" type="number" min="2" max="8" step="1" placeholder="e.g., 4"></div>
 <div><label for="memberNumber">Your member number</label><input id="memberNumber" type="number" min="1" max="8" step="1" placeholder="e.g., 2"><div class="small">Coordinate within your group so each person uses a different number: 1, 2, 3, etc.</div></div>
 </div>
+
+<div style="margin-top:14px">
+<label for="nickname">Anonymous nickname</label>
+<input id="nickname" type="text" maxlength="40" autocomplete="off" placeholder="e.g., Gandalf, Bluey, Wonder Woman, Sherlock Holmes">
+<div class="small"><strong>Do not enter your real name.</strong> Use a fake name or the name of a fictional character from a TV show, book, movie, game, etc. Use the same nickname if you return later to update your entry.</div>
+</div>
+
 <div class="grid2" style="margin-top:14px">
 <div><label for="touchedData">Touched plants — height (cm)</label><textarea id="touchedData" placeholder="One height per line, or separate values with commas/spaces."></textarea></div>
 <div><label for="controlData">Untouched plants — height (cm)</label><textarea id="controlData" placeholder="One height per line, or separate values with commas/spaces."></textarea></div>
@@ -84,7 +91,7 @@ const ALL_GROUPS=Array.from({length:20},(_,i)=>i+1);
 
 const el=id=>document.getElementById(id);
 const groupNumberEl=el("groupNumber"),groupSizeEl=el("groupSize"),memberNumberEl=el("memberNumber"),
-touchedDataEl=el("touchedData"),controlDataEl=el("controlData"),
+nicknameEl=el("nickname"),touchedDataEl=el("touchedData"),controlDataEl=el("controlData"),
 submitBtn=el("submitBtn"),clearBtn=el("clearBtn"),submitStatusEl=el("submitStatus"),
 connectionStatusEl=el("connectionStatus"),groupSummaryEl=el("groupSummary"),
 analysisSummaryEl=el("analysisSummary"),testOutputEl=el("testOutput"),downloadChartBtn=el("downloadChartBtn");
@@ -149,6 +156,19 @@ submitBtn.addEventListener("click",async()=>{
   const group=Number(groupNumberEl.value);
   const expectedMembers=Number(groupSizeEl.value);
   const memberNumber=Number(memberNumberEl.value);
+  const nickname=nicknameEl.value.trim().replace(/\s+/g," ");
+
+  if(!nickname){
+   throw new Error("Enter an anonymous nickname. Do not use your real name.");
+  }
+
+  if(nickname.length<2||nickname.length>40){
+   throw new Error("Your anonymous nickname must be between 2 and 40 characters.");
+  }
+
+  if(nickname.includes("@")){
+   throw new Error("Do not enter an email address. Use a fake name or fictional character instead.");
+  }
 
   if(!Number.isInteger(expectedMembers)||expectedMembers<2||expectedMembers>8)
    throw new Error("Enter the total number of students in your group (2–8).");
@@ -171,12 +191,13 @@ submitBtn.addEventListener("click",async()=>{
    group,
    expectedMembers,
    memberNumber,
+   nickname,
    touched,
    control,
    updatedAt:serverTimestamp()
   });
 
-  submitStatusEl.innerHTML='<div class="status ok">Your Group '+group+', member '+memberNumber+' entry was saved.</div>';
+  submitStatusEl.innerHTML='<div class="status ok">Your anonymous entry as <strong>'+escapeHtml(nickname)+'</strong> (Group '+group+', member '+memberNumber+') was saved.</div>';
  }catch(err){
   console.error(err);
   submitStatusEl.innerHTML='<div class="status bad">'+escapeHtml(err.message)+'</div>';
@@ -268,13 +289,14 @@ function renderAll(){
 function renderGroups(states){
  const active=states.filter(s=>s.rows.length);
  if(!active.length){groupSummaryEl.textContent="No submissions yet.";return}
- let h="<table><thead><tr><th>Group</th><th>Submissions</th><th>Status</th></tr></thead><tbody>";
+ let h="<table><thead><tr><th>Group</th><th>Anonymous nicknames submitted</th><th>Submissions</th><th>Status</th></tr></thead><tbody>";
  active.forEach(s=>{
   let status="";
   if(s.status==="accepted")status='<strong style="color:#1b5e20">Accepted</strong>';
   else if(s.status==="waiting")status='<strong style="color:#7a5300">Waiting for all members</strong>';
   else status='<strong style="color:#8e1b1b">Mismatch — excluded</strong><br><span class="small">'+escapeHtml(s.reason||"Re-enter the complete data until all entries agree.")+"</span>";
-  h+="<tr><td>Group "+s.group+"</td><td>"+s.rows.length+"/"+(s.expectedMembers??"?")+"</td><td>"+status+"</td></tr>";
+  const names=s.rows.map(r=>r.nickname?escapeHtml(r.nickname):("Member "+r.memberNumber)).join(", ");
+  h+="<tr><td>Group "+s.group+"</td><td>"+names+"</td><td>"+s.rows.length+"/"+(s.expectedMembers??"?")+"</td><td>"+status+"</td></tr>";
  });
  groupSummaryEl.innerHTML=h+"</tbody></table>";
 }
