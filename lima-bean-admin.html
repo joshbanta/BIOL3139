@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Lima Bean Experiment — Instructor Control Panel</title>
+<style>
+:root{--border:#d8d8d8;--muted:#666;--bg:#f7f7f7;--ok:#e8f5e9;--okText:#1b5e20;--warn:#fff8e1;--warnText:#7a5300;--bad:#ffebee;--badText:#8e1b1b}
+*{box-sizing:border-box}body{font-family:Arial,Helvetica,sans-serif;line-height:1.45;margin:0;color:#222;background:#fff}
+main{max-width:850px;margin:auto;padding:28px 18px 60px}
+h1,h2{line-height:1.2}.card{border:1px solid var(--border);border-radius:10px;padding:18px;margin:18px 0;background:#fff}
+.status{padding:10px 12px;border-radius:8px;margin:10px 0;font-weight:600}.ok{background:var(--ok);color:var(--okText)}.warn{background:var(--warn);color:var(--warnText)}.bad{background:var(--bad);color:var(--badText)}
+label{display:block;font-weight:700;margin-bottom:5px}input,select,button{font:inherit}
+input,select{width:100%;border:1px solid #aaa;border-radius:6px;padding:9px 10px;background:#fff}
+button{border:1px solid #555;border-radius:7px;padding:10px 14px;cursor:pointer;background:#f2f2f2;margin:4px 6px 4px 0}
+button:disabled{opacity:.5;cursor:not-allowed}.primary{background:#222;color:#fff;border-color:#222}.danger{background:#8e1b1b;color:#fff;border-color:#8e1b1b}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.small{color:var(--muted);font-size:.92rem}
+table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid var(--border);padding:8px;text-align:left}th{background:#f1f1f1}
+[hidden]{display:none!important}
+@media(max-width:700px){.grid2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+<h1>Lima Bean Experiment — Instructor Control Panel</h1>
+<p class="small">This page is not linked from the student app. Deletion is enforced by Firestore security rules and requires the instructor account.</p>
+
+<section id="loginCard" class="card">
+<h2>Instructor sign-in</h2>
+<div class="grid2">
+<div>
+<label for="email">Email</label>
+<input id="email" type="email" value="jbanta@uttyler.edu" readonly>
+</div>
+<div>
+<label for="password">Firebase password</label>
+<input id="password" type="password" autocomplete="current-password">
+</div>
+</div>
+<button id="loginBtn" class="primary">Sign in</button>
+<div id="loginStatus"></div>
+</section>
+
+<section id="adminCard" class="card" hidden>
+<h2>Class data controls</h2>
+<div id="authStatus" class="status ok"></div>
+
+<div class="card">
+<h2>Clear one group</h2>
+<label for="groupSelect">Group</label>
+<select id="groupSelect"></select>
+<p id="groupCount" class="small">Loading submission count…</p>
+<button id="clearGroupBtn" class="danger">Clear selected group</button>
+</div>
+
+<div class="card">
+<h2>Clear all class data</h2>
+<p><strong>This deletes every student submission in the lima bean experiment collection.</strong></p>
+<button id="clearAllBtn" class="danger">Clear ALL class data</button>
+</div>
+
+<div class="card">
+<h2>Current submissions</h2>
+<button id="refreshBtn">Refresh counts</button>
+<div id="countsOutput">Loading…</div>
+</div>
+
+<button id="logoutBtn">Sign out</button>
+<div id="actionStatus"></div>
+</section>
+</main>
+
+<script type="module">
+import{initializeApp}from"https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
+import{getAuth,signInWithEmailAndPassword,signOut,onAuthStateChanged}from"https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
+import{getFirestore,collection,getDocs,writeBatch}from"https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
+
+const firebaseConfig={
+ apiKey:"AIzaSyDpSiAC4FMYxdWWZV2_nDr2nR4rN4dVHwM",
+ authDomain:"plant-bio-lab-fall-2026.firebaseapp.com",
+ projectId:"plant-bio-lab-fall-2026",
+ storageBucket:"plant-bio-lab-fall-2026.firebasestorage.app",
+ messagingSenderId:"295510943061",
+ appId:"1:295510943061:web:77ff0349feb7a9ea4ebbdc",
+ measurementId:"G-YPM4E2MR9T"
+};
+
+const INSTRUCTOR_EMAIL="jbanta@uttyler.edu";
+const COLLECTION_NAME="limaBeanTouch_Fall2026";
+const ALL_GROUPS=Array.from({length:20},(_,i)=>i+1);
+
+const el=id=>document.getElementById(id);
+const loginCard=el("loginCard"),adminCard=el("adminCard"),emailEl=el("email"),passwordEl=el("password"),
+loginBtn=el("loginBtn"),loginStatus=el("loginStatus"),authStatus=el("authStatus"),
+groupSelect=el("groupSelect"),groupCount=el("groupCount"),clearGroupBtn=el("clearGroupBtn"),
+clearAllBtn=el("clearAllBtn"),refreshBtn=el("refreshBtn"),countsOutput=el("countsOutput"),
+logoutBtn=el("logoutBtn"),actionStatus=el("actionStatus");
+
+ALL_GROUPS.forEach(g=>{
+ const o=document.createElement("option");
+ o.value=String(g);
+ o.textContent="Group "+g;
+ groupSelect.appendChild(o);
+});
+
+const app=initializeApp(firebaseConfig);
+const auth=getAuth(app);
+const db=getFirestore(app);
+
+let cachedDocs=[];
+
+function setAction(message,type="ok"){
+ actionStatus.className="status "+type;
+ actionStatus.textContent=message;
+}
+
+function escapeHtml(v){
+ return String(v)
+  .replaceAll("&","&amp;")
+  .replaceAll("<","&lt;")
+  .replaceAll(">","&gt;")
+  .replaceAll('"',"&quot;")
+  .replaceAll("'","&#039;");
+}
+
+async function refreshCounts(){
+ countsOutput.textContent="Loading…";
+ groupCount.textContent="Loading submission count…";
+
+ const snap=await getDocs(collection(db,COLLECTION_NAME));
+ cachedDocs=snap.docs.map(d=>({ref:d.ref,id:d.id,...d.data()}));
+
+ const counts=new Map(ALL_GROUPS.map(g=>[g,0]));
+ for(const d of cachedDocs){
+  const g=Number(d.group);
+  if(counts.has(g))counts.set(g,counts.get(g)+1);
+ }
+
+ let html="<table><thead><tr><th>Group</th><th>Saved submissions</th></tr></thead><tbody>";
+ for(const g of ALL_GROUPS){
+  html+="<tr><td>Group "+g+"</td><td>"+counts.get(g)+"</td></tr>";
+ }
+ html+="<tr><th>Total</th><th>"+cachedDocs.length+"</th></tr></tbody></table>";
+ countsOutput.innerHTML=html;
+ updateSelectedCount();
+}
+
+function updateSelectedCount(){
+ const g=Number(groupSelect.value);
+ const n=cachedDocs.filter(d=>Number(d.group)===g).length;
+ groupCount.textContent="Group "+g+" currently has "+n+" saved submission"+(n===1?"":"s")+".";
+}
+
+async function deleteRefs(refs){
+ for(let i=0;i<refs.length;i+=450){
+  const batch=writeBatch(db);
+  refs.slice(i,i+450).forEach(ref=>batch.delete(ref));
+  await batch.commit();
+ }
+}
+
+loginBtn.addEventListener("click",async()=>{
+ loginStatus.innerHTML="";
+ loginBtn.disabled=true;
+ try{
+  await signInWithEmailAndPassword(auth,INSTRUCTOR_EMAIL,passwordEl.value);
+  passwordEl.value="";
+ }catch(err){
+  loginStatus.innerHTML='<div class="status bad">Sign-in failed: '+escapeHtml(err.message)+'</div>';
+ }finally{
+  loginBtn.disabled=false;
+ }
+});
+
+passwordEl.addEventListener("keydown",e=>{
+ if(e.key==="Enter")loginBtn.click();
+});
+
+logoutBtn.addEventListener("click",()=>signOut(auth));
+refreshBtn.addEventListener("click",async()=>{
+ try{
+  await refreshCounts();
+  setAction("Counts refreshed.");
+ }catch(err){
+  setAction("Could not refresh counts: "+err.message,"bad");
+ }
+});
+groupSelect.addEventListener("change",updateSelectedCount);
+
+clearGroupBtn.addEventListener("click",async()=>{
+ const g=Number(groupSelect.value);
+ const refs=cachedDocs.filter(d=>Number(d.group)===g).map(d=>d.ref);
+
+ if(!refs.length){
+  setAction("Group "+g+" has no saved submissions to delete.","warn");
+  return;
+ }
+
+ const phrase="CLEAR GROUP "+g;
+ const entered=prompt(
+  "This will permanently delete all "+refs.length+" saved submission(s) for Group "+g+".\n\nType exactly: "+phrase
+ );
+
+ if(entered!==phrase){
+  setAction("Group reset cancelled.","warn");
+  return;
+ }
+
+ clearGroupBtn.disabled=true;
+ clearAllBtn.disabled=true;
+
+ try{
+  await deleteRefs(refs);
+  await refreshCounts();
+  setAction("Group "+g+" was reset. "+refs.length+" submission(s) deleted.");
+ }catch(err){
+  setAction("Could not reset Group "+g+": "+err.message,"bad");
+ }finally{
+  clearGroupBtn.disabled=false;
+  clearAllBtn.disabled=false;
+ }
+});
+
+clearAllBtn.addEventListener("click",async()=>{
+ if(!cachedDocs.length){
+  setAction("There are no class submissions to delete.","warn");
+  return;
+ }
+
+ const phrase="CLEAR ALL CLASS DATA";
+ const entered=prompt(
+  "WARNING: This will permanently delete ALL "+cachedDocs.length+" saved student submissions.\n\nType exactly: "+phrase
+ );
+
+ if(entered!==phrase){
+  setAction("Full reset cancelled.","warn");
+  return;
+ }
+
+ clearGroupBtn.disabled=true;
+ clearAllBtn.disabled=true;
+
+ try{
+  const refs=cachedDocs.map(d=>d.ref);
+  await deleteRefs(refs);
+  await refreshCounts();
+  setAction("All class submission data were deleted.");
+ }catch(err){
+  setAction("Could not clear all class data: "+err.message,"bad");
+ }finally{
+  clearGroupBtn.disabled=false;
+  clearAllBtn.disabled=false;
+ }
+});
+
+onAuthStateChanged(auth,async user=>{
+ if(!user){
+  loginCard.hidden=false;
+  adminCard.hidden=true;
+  cachedDocs=[];
+  return;
+ }
+
+ if((user.email||"").toLowerCase()!==INSTRUCTOR_EMAIL){
+  await signOut(auth);
+  loginStatus.innerHTML='<div class="status bad">This account is not authorized for the instructor control panel.</div>';
+  return;
+ }
+
+ loginCard.hidden=true;
+ adminCard.hidden=false;
+ authStatus.textContent="Signed in as "+user.email+".";
+ actionStatus.className="";
+ actionStatus.textContent="";
+
+ try{
+  await refreshCounts();
+ }catch(err){
+  setAction("Signed in, but the database could not be read: "+err.message,"bad");
+ }
+});
+</script>
+</body>
+</html>
