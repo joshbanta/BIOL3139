@@ -5,7 +5,10 @@ service cloud.firestore {
 
     function isInstructor() {
       return request.auth != null
-             && request.auth.token.email == "jbanta@uttyler.edu";
+             && (
+               request.auth.token.email == "jbanta@uttyler.edu"
+               || request.auth.token.email == "gbouse2@uttyler.edu"
+             );
     }
 
     match /limaBeanTouch_Fall2026/{submissionId} {
@@ -25,7 +28,7 @@ service cloud.firestore {
                     && request.resource.data.ownerUid == request.auth.uid;
 
       // Students may delete their own records. The authenticated instructor
-      // account may delete any submission for group or class resets.
+      // accounts may delete any submission for group or class resets.
       allow delete: if request.auth != null
                     && (
                       resource.data.ownerUid == request.auth.uid
