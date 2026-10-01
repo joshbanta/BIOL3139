@@ -30,8 +30,11 @@ table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid
 <h2>Instructor sign-in</h2>
 <div class="grid2">
 <div>
-<label for="email">Email</label>
-<input id="email" type="email" value="jbanta@uttyler.edu" readonly>
+<label for="email">Authorized admin</label>
+<select id="email">
+<option value="jbanta@uttyler.edu">jbanta@uttyler.edu</option>
+<option value="gbouse2@uttyler.edu">gbouse2@uttyler.edu</option>
+</select>
 </div>
 <div>
 <label for="password">Firebase password</label>
@@ -86,7 +89,7 @@ const firebaseConfig={
  measurementId:"G-YPM4E2MR9T"
 };
 
-const INSTRUCTOR_EMAIL="jbanta@uttyler.edu";
+const AUTHORIZED_ADMINS=["jbanta@uttyler.edu","gbouse2@uttyler.edu"];
 const COLLECTION_NAME="limaBeanTouch_Fall2026";
 const ALL_GROUPS=Array.from({length:20},(_,i)=>i+1);
 
@@ -164,7 +167,11 @@ loginBtn.addEventListener("click",async()=>{
  loginStatus.innerHTML="";
  loginBtn.disabled=true;
  try{
-  await signInWithEmailAndPassword(auth,INSTRUCTOR_EMAIL,passwordEl.value);
+  const selectedEmail=emailEl.value.trim().toLowerCase();
+  if(!AUTHORIZED_ADMINS.includes(selectedEmail)){
+   throw new Error("This email is not authorized for the instructor control panel.");
+  }
+  await signInWithEmailAndPassword(auth,selectedEmail,passwordEl.value);
   passwordEl.value="";
  }catch(err){
   loginStatus.innerHTML='<div class="status bad">Sign-in failed: '+escapeHtml(err.message)+'</div>';
@@ -262,7 +269,7 @@ onAuthStateChanged(auth,async user=>{
   return;
  }
 
- if((user.email||"").toLowerCase()!==INSTRUCTOR_EMAIL){
+ if(!AUTHORIZED_ADMINS.includes((user.email||"").toLowerCase())){
   await signOut(auth);
   loginStatus.innerHTML='<div class="status bad">This account is not authorized for the instructor control panel.</div>';
   return;
