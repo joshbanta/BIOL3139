@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lima Bean Touch Experiment</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jstat@1.9.6/dist/jstat.min.js"></script>
+<style>
+:root{--border:#d8d8d8;--muted:#666;--bg:#f7f7f7;--ok:#e8f5e9;--okText:#1b5e20;--warn:#fff8e1;--warnText:#7a5300;--bad:#ffebee;--badText:#8e1b1b}
+*{box-sizing:border-box}body{font-family:Arial,Helvetica,sans-serif;line-height:1.45;margin:0;color:#222;background:#fff}
+main{max-width:1050px;margin:auto;padding:24px 18px 50px}h1,h2,h3{line-height:1.2}.card{border:1px solid var(--border);border-radius:10px;padding:18px;margin:18px 0;background:#fff}
+.note{background:var(--bg);border-left:4px solid #888;padding:12px 14px;margin:12px 0}.status{padding:10px 12px;border-radius:8px;margin:10px 0;font-weight:600}.ok{background:var(--ok);color:var(--okText)}.warn{background:var(--warn);color:var(--warnText)}.bad{background:var(--bad);color:var(--badText)}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+label{display:block;font-weight:700;margin-bottom:5px}input,textarea,select,button{font:inherit}input,textarea,select{width:100%;border:1px solid #aaa;border-radius:6px;padding:9px 10px;background:#fff}
+textarea{min-height:155px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}button{border:1px solid #555;border-radius:7px;padding:9px 14px;cursor:pointer;background:#f2f2f2;margin:4px 6px 4px 0}.primary{background:#222;color:#fff;border-color:#222}button:disabled{opacity:.5;cursor:not-allowed}
+.small{color:var(--muted);font-size:.92rem}.shelf-display{min-height:42px;display:flex;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);font-weight:700}
+table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid var(--border);padding:8px;text-align:left;vertical-align:top}th{background:#f1f1f1}.num{text-align:right;font-variant-numeric:tabular-nums}
+.chart-wrap{max-width:760px;margin:auto}#chartCanvas{width:100%;max-height:520px}
+@media(max-width:760px){.grid,.grid2{grid-template-columns:1fr}th,td{font-size:.9rem}}
+</style>
+</head>
+<body>
+<main>
+<h1>Lima Bean Touch Experiment</h1>
+<p>Enter the complete height data for your group. Every member should enter the same complete dataset independently. Measurement order does not matter. A group enters the class analysis only after all expected group members have submitted matching data.</p>
+<div id="connectionStatus" class="status warn">Connecting to the class database…</div>
+
+<section class="card">
+<h2>Submit your group data</h2>
+<div class="grid">
+<div><label for="groupNumber">Group number</label><select id="groupNumber"></select></div>
+<div><label for="groupSize">Number of students in your group</label><input id="groupSize" type="number" min="2" max="8" step="1" placeholder="e.g., 4"></div>
+<div><label for="memberNumber">Your member number</label><input id="memberNumber" type="number" min="1" max="8" step="1" placeholder="e.g., 2"><div class="small">Coordinate within your group so each person uses a different number: 1, 2, 3, etc.</div></div>
+</div>
+<div style="margin-top:14px"><label>Shelf assigned from group number</label><div id="shelfDisplay" class="shelf-display">—</div></div>
+<div class="grid2" style="margin-top:14px">
+<div><label for="touchedData">Touched plants — height (cm)</label><textarea id="touchedData" placeholder="One height per line, or separate values with commas/spaces."></textarea></div>
+<div><label for="controlData">Untouched control plants — height (cm)</label><textarea id="controlData" placeholder="One height per line, or separate values with commas/spaces."></textarea></div>
+</div>
+<p class="small">Different entry order is fine. Matching is based on the complete numerical datasets for touched and control plants.</p>
+<button id="submitBtn" class="primary" disabled>Submit / update my entry</button>
+<button id="clearBtn" disabled>Delete my current entry</button>
+<div id="submitStatus"></div>
+</section>
+
+<section class="card">
+<h2>Group data status</h2>
+<p class="small">Only groups marked <strong>Accepted</strong> are included. A mismatched group is excluded until all members' datasets agree.</p>
+<div id="groupSummary">No submissions yet.</div>
+</section>
+
+<section class="card">
+<h2>Live class analysis</h2>
+<div id="analysisSummary" class="note">Waiting for accepted group data.</div>
+<h3>Mixed / nested ANOVA</h3>
+<p class="small">Shelf and touch treatment are fixed effects. Tray (group) is a random effect nested within shelf. Shelf × treatment is included. Each tray contributes one touched mean and one control mean so trays receive equal weight.</p>
+<div id="anovaOutput">Not enough data yet.</div>
+<h3 style="margin-top:24px">Touched vs. control height</h3>
+<p class="small">Bars show the mean of tray means; error bars are ±1 SE among accepted trays.</p>
+<div class="chart-wrap"><canvas id="chartCanvas"></canvas></div>
+<button id="downloadChartBtn" disabled>Download graph as PNG</button>
+</section>
+</main>
+
+<script type="module">
+import{initializeApp}from"https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
+import{getAuth,signInAnonymously,onAuthStateChanged}from"https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
+import{getFirestore,collection,doc,setDoc,deleteDoc,getDoc,onSnapshot,serverTimestamp}from"https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
+
+/* =========================================================
+   INSTRUCTOR CONFIGURATION
+   =========================================================
+   GitHub Pages hosts this front end. Firebase Firestore supplies
+   the shared writable database required for live class results.
+
+   Paste the Firebase web-app config below after creating the project.
+*/
+const firebaseConfig={
+ apiKey:"PASTE_FIREBASE_API_KEY_HERE",
+ authDomain:"PASTE_PROJECT_ID.firebaseapp.com",
+ projectId:"PASTE_PROJECT_ID_HERE",
+ storageBucket:"PASTE_PROJECT_ID.firebasestorage.app",
+ messagingSenderId:"PASTE_MESSAGING_SENDER_ID_HERE",
+ appId:"PASTE_APP_ID_HERE"
+};
+
+const COLLECTION_NAME="limaBeanTouch_Fall2026";
+
+/* Provisional rack mapping from the class description:
+   Tuesday groups 1–10 = all top + first half of middle;
+   Wednesday groups 11–20 = second half of middle + all bottom.
+   Change only these arrays if the physical shelf boundaries differ. */
+const TOP_GROUPS=[1,2,3,4,5,6,7];
+const MIDDLE_GROUPS=[8,9,10,11,12,13];
+const BOTTOM_GROUPS=[14,15,16,17,18,19,20];
+const ALL_GROUPS=[...TOP_GROUPS,...MIDDLE_GROUPS,...BOTTOM_GROUPS].sort((a,b)=>a-b);
+
+function shelfForGroup(g){
+ if(TOP_GROUPS.includes(g))return"Top";
+ if(MIDDLE_GROUPS.includes(g))return"Middle";
+ if(BOTTOM_GROUPS.includes(g))return"Bottom";
+ return null;
+}
+
+const el=id=>document.getElementById(id);
+const groupNumberEl=el("groupNumber"),groupSizeEl=el("groupSize"),memberNumberEl=el("memberNumber"),
+shelfDisplayEl=el("shelfDisplay"),touchedDataEl=el("touchedData"),controlDataEl=el("controlData"),
+submitBtn=el("submitBtn"),clearBtn=el("clearBtn"),submitStatusEl=el("submitStatus"),
+connectionStatusEl=el("connectionStatus"),groupSummaryEl=el("groupSummary"),
+analysisSummaryEl=el("analysisSummary"),anovaOutputEl=el("anovaOutput"),downloadChartBtn=el("downloadChartBtn");
+
+ALL_GROUPS.forEach(g=>{const o=document.createElement("option");o.value=g;o.textContent="Group "+g;groupNumberEl.appendChild(o)});
+function updateShelf(){const g=Number(groupNumberEl.value),s=shelfForGroup(g);shelfDisplayEl.textContent=s?s+" shelf":"Group not mapped"}
+groupNumberEl.addEventListener("change",updateShelf);updateShelf();
+
+let db=null,auth=null,currentUser=null,unsubscribe=null,liveSubmissions=[],chart=null;
+const configReady=firebaseConfig.apiKey&&!firebaseConfig.apiKey.includes("PASTE_")&&firebaseConfig.projectId&&!firebaseConfig.projectId.includes("PASTE_");
+
+if(!configReady){
+ connectionStatusEl.className="status bad";
+ connectionStatusEl.textContent="Instructor setup required: Firebase has not yet been connected to this page.";
+}else{
+ try{
+  const app=initializeApp(firebaseConfig);db=getFirestore(app);auth=getAuth(app);
+  onAuthStateChanged(auth,user=>{
+   if(user){
+    currentUser=user;submitBtn.disabled=false;clearBtn.disabled=false;
+    connectionStatusEl.className="status ok";
+    connectionStatusEl.textContent="Connected. Class results update automatically as accepted group data arrive.";
+    startRealtime();
+   }
+  });
+  await signInAnonymously(auth);
+ }catch(err){
+  console.error(err);connectionStatusEl.className="status bad";
+  connectionStatusEl.textContent="Could not connect to the class database: "+err.message;
+ }
+}
+
+function startRealtime(){
+ if(!db||unsubscribe)return;
+ unsubscribe=onSnapshot(collection(db,COLLECTION_NAME),snap=>{
+  liveSubmissions=snap.docs.map(d=>({id:d.id,...d.data()}));renderAll();
+ },err=>{
+  console.error(err);connectionStatusEl.className="status bad";
+  connectionStatusEl.textContent="Database read error: "+err.message;
+ });
+}
+
+function parseHeights(text,label){
+ const cleaned=text.trim();if(!cleaned)throw new Error(label+": enter at least one height.");
+ const values=cleaned.split(/[\s,;]+/).filter(Boolean).map(Number);
+ if(values.some(v=>!Number.isFinite(v)))throw new Error(label+": every entry must be numeric.");
+ if(values.some(v=>v<0||v>300))throw new Error(label+": a height is outside 0–300 cm.");
+ return values.map(v=>Number(v.toFixed(3))).sort((a,b)=>a-b);
+}
+function documentId(g,m){return"g"+String(g).padStart(2,"0")+"_m"+String(m).padStart(2,"0")}
+
+submitBtn.addEventListener("click",async()=>{
+ submitStatusEl.innerHTML="";
+ if(!db||!currentUser)return;
+ try{
+  const group=Number(groupNumberEl.value),expectedMembers=Number(groupSizeEl.value),memberNumber=Number(memberNumberEl.value),shelf=shelfForGroup(group);
+  if(!Number.isInteger(expectedMembers)||expectedMembers<2||expectedMembers>8)throw new Error("Enter the total number of students in your group (2–8).");
+  if(!Number.isInteger(memberNumber)||memberNumber<1||memberNumber>expectedMembers)throw new Error("Your member number must be between 1 and "+expectedMembers+".");
+  if(!shelf)throw new Error("This group is not mapped to a shelf.");
+  const touched=parseHeights(touchedDataEl.value,"Touched plants"),control=parseHeights(controlDataEl.value,"Control plants");
+  const ref=doc(db,COLLECTION_NAME,documentId(group,memberNumber)),existing=await getDoc(ref);
+  if(existing.exists()&&existing.data().ownerUid!==currentUser.uid)throw new Error("That member slot is already being used by another device. Choose your own member number.");
+  await setDoc(ref,{ownerUid:currentUser.uid,group,shelf,expectedMembers,memberNumber,touched,control,updatedAt:serverTimestamp()});
+  submitStatusEl.innerHTML='<div class="status ok">Your Group '+group+', member '+memberNumber+' entry was saved.</div>';
+ }catch(err){console.error(err);submitStatusEl.innerHTML='<div class="status bad">'+escapeHtml(err.message)+'</div>'}
+});
+
+clearBtn.addEventListener("click",async()=>{
+ submitStatusEl.innerHTML="";if(!db||!currentUser)return;
+ try{
+  const group=Number(groupNumberEl.value),memberNumber=Number(memberNumberEl.value);
+  if(!Number.isInteger(memberNumber)||memberNumber<1)throw new Error("Enter your member number first.");
+  const ref=doc(db,COLLECTION_NAME,documentId(group,memberNumber)),existing=await getDoc(ref);
+  if(!existing.exists())throw new Error("There is no saved entry in that slot.");
+  if(existing.data().ownerUid!==currentUser.uid)throw new Error("That slot belongs to another device and cannot be deleted here.");
+  await deleteDoc(ref);submitStatusEl.innerHTML='<div class="status ok">Your saved entry was deleted.</div>';
+ }catch(err){console.error(err);submitStatusEl.innerHTML='<div class="status bad">'+escapeHtml(err.message)+'</div>'}
+});
+
+function signatureOf(s){return JSON.stringify({touched:[...s.touched].sort((a,b)=>a-b),control:[...s.control].sort((a,b)=>a-b)})}
+function buildGroupStates(submissions){
+ const byGroup=new Map();
+ submissions.forEach(s=>{if(Number.isInteger(s.group)){if(!byGroup.has(s.group))byGroup.set(s.group,[]);byGroup.get(s.group).push(s)}});
+ return ALL_GROUPS.map(group=>{
+  const rows=(byGroup.get(group)||[]).sort((a,b)=>a.memberNumber-b.memberNumber),shelf=shelfForGroup(group);
+  if(!rows.length)return{group,shelf,rows,status:"none",accepted:false,expectedMembers:null};
+  const expectedSet=[...new Set(rows.map(r=>Number(r.expectedMembers)))];
+  if(expectedSet.length!==1||!Number.isInteger(expectedSet[0]))return{group,shelf,rows,status:"mismatch",accepted:false,expectedMembers:null,reason:"Group members entered different group sizes."};
+  const expectedMembers=expectedSet[0],memberSet=new Set(rows.map(r=>Number(r.memberNumber)));
+  const invalid=rows.some(r=>!Number.isInteger(r.memberNumber)||r.memberNumber<1||r.memberNumber>expectedMembers);
+  const signatures=[...new Set(rows.map(signatureOf))];
+  if(invalid||memberSet.size!==rows.length||rows.length>expectedMembers)return{group,shelf,rows,status:"mismatch",accepted:false,expectedMembers,reason:"Member-number entries are inconsistent with the reported group size."};
+  if(signatures.length>1)return{group,shelf,rows,status:"mismatch",accepted:false,expectedMembers,reason:"Submitted height datasets do not match. Every member should check and re-enter the complete touched and control lists."};
+  const allSlots=Array.from({length:expectedMembers},(_,i)=>i+1).every(m=>memberSet.has(m));
+  if(rows.length<expectedMembers||!allSlots)return{group,shelf,rows,status:"waiting",accepted:false,expectedMembers};
+  return{group,shelf,rows,status:"accepted",accepted:true,expectedMembers,data:{touched:[...rows[0].touched],control:[...rows[0].control]}};
+ });
+}
+
+function mean(v){return v.reduce((a,b)=>a+b,0)/v.length}
+function variance(v){if(v.length<2)return NaN;const m=mean(v);return v.reduce((s,x)=>s+(x-m)**2,0)/(v.length-1)}
+function se(v){return v.length<2?0:Math.sqrt(variance(v)/v.length)}
+function safeF(a,b){if(a==null||b==null)return null;if(b===0)return a===0?0:Infinity;return a/b}
+function fP(F,df1,df2){
+ if(!(df1>0)||!(df2>0)||Number.isNaN(F))return null;
+ if(!Number.isFinite(F))return F===Infinity?0:null;
+ if(F<0)return null;
+ return Math.max(0,Math.min(1,1-window.jStat.centralF.cdf(F,df1,df2)));
+}
+
+function mixedNestedAnova(states){
+ const trays=states.map(g=>{
+  const touchedMean=mean(g.data.touched),controlMean=mean(g.data.control);
+  return{group:g.group,shelf:g.shelf,touchedMean,controlMean,midMean:(touchedMean+controlMean)/2,difference:touchedMean-controlMean};
+ });
+ const shelfLevels=[...new Set(trays.map(t=>t.shelf))],N=trays.length,S=shelfLevels.length;
+ if(N<2)return{trays,rows:[],N,S,shelfLevels};
+ const shelfInfo=new Map();
+ shelfLevels.forEach(shelf=>{
+  const t=trays.filter(x=>x.shelf===shelf);
+  shelfInfo.set(shelf,{trays:t,n:t.length,midMean:mean(t.map(x=>x.midMean)),diffMean:mean(t.map(x=>x.difference))});
+ });
+ const grandMid=mean(trays.map(x=>x.midMean)),grandDiff=mean(trays.map(x=>x.difference));
+ const ssShelf=2*shelfLevels.reduce((sum,shelf)=>{const s=shelfInfo.get(shelf);return sum+s.n*(s.midMean-grandMid)**2},0);
+ const ssTrayShelf=2*trays.reduce((sum,t)=>{const s=shelfInfo.get(t.shelf);return sum+(t.midMean-s.midMean)**2},0);
+ const ssTreatment=N*(grandDiff**2)/2;
+ const ssInteraction=shelfLevels.reduce((sum,shelf)=>{const s=shelfInfo.get(shelf);return sum+s.n*((s.diffMean-grandDiff)**2)/2},0);
+ const ssTreatTrayShelf=trays.reduce((sum,t)=>{const s=shelfInfo.get(t.shelf);return sum+((t.difference-s.diffMean)**2)/2},0);
+ const dfShelf=S-1,dfTrayShelf=N-S,dfTreatment=1,dfInteraction=S-1,dfTreatTrayShelf=N-S;
+ const msShelf=dfShelf>0?ssShelf/dfShelf:null,msTrayShelf=dfTrayShelf>0?ssTrayShelf/dfTrayShelf:null,msTreatment=ssTreatment,
+ msInteraction=dfInteraction>0?ssInteraction/dfInteraction:null,msTreatTrayShelf=dfTreatTrayShelf>0?ssTreatTrayShelf/dfTreatTrayShelf:null;
+ const fShelf=dfShelf>0&&dfTrayShelf>0?safeF(msShelf,msTrayShelf):null,
+ fTreatment=dfTreatTrayShelf>0?safeF(msTreatment,msTreatTrayShelf):null,
+ fInteraction=dfInteraction>0&&dfTreatTrayShelf>0?safeF(msInteraction,msTreatTrayShelf):null;
+ const rows=[
+  {source:"Shelf (fixed)",df:dfShelf,ss:ssShelf,ms:msShelf,F:fShelf,p:fShelf==null?null:fP(fShelf,dfShelf,dfTrayShelf)},
+  {source:"Tray within Shelf (random)",df:dfTrayShelf,ss:ssTrayShelf,ms:msTrayShelf,F:null,p:null},
+  {source:"Touch treatment (fixed)",df:dfTreatment,ss:ssTreatment,ms:msTreatment,F:fTreatment,p:fTreatment==null?null:fP(fTreatment,dfTreatment,dfTreatTrayShelf)},
+  {source:"Shelf × Touch treatment",df:dfInteraction,ss:ssInteraction,ms:msInteraction,F:fInteraction,p:fInteraction==null?null:fP(fInteraction,dfInteraction,dfTreatTrayShelf)},
+  {source:"Touch treatment × Tray(Shelf) [error]",df:dfTreatTrayShelf,ss:ssTreatTrayShelf,ms:msTreatTrayShelf,F:null,p:null}
+ ];
+ return{trays,rows,N,S,shelfLevels};
+}
+
+function renderAll(){
+ const states=buildGroupStates(liveSubmissions);
+ renderGroups(states);renderAnalysis(states.filter(g=>g.accepted));
+}
+function renderGroups(states){
+ const active=states.filter(s=>s.rows.length);
+ if(!active.length){groupSummaryEl.textContent="No submissions yet.";return}
+ let h="<table><thead><tr><th>Group</th><th>Shelf</th><th>Submissions</th><th>Status</th></tr></thead><tbody>";
+ active.forEach(s=>{
+  let status="";
+  if(s.status==="accepted")status='<strong style="color:#1b5e20">Accepted</strong>';
+  else if(s.status==="waiting")status='<strong style="color:#7a5300">Waiting for all members</strong>';
+  else status='<strong style="color:#8e1b1b">Mismatch — excluded</strong><br><span class="small">'+escapeHtml(s.reason||"Re-enter the complete data until all entries agree.")+"</span>";
+  h+="<tr><td>Group "+s.group+"</td><td>"+escapeHtml(s.shelf||"Unmapped")+"</td><td>"+s.rows.length+"/"+(s.expectedMembers??"?")+"</td><td>"+status+"</td></tr>";
+ });
+ groupSummaryEl.innerHTML=h+"</tbody></table>";
+}
+function renderAnalysis(states){
+ if(!states.length){
+  analysisSummaryEl.textContent="Waiting for at least one accepted group.";anovaOutputEl.textContent="Not enough data yet.";updateChart([],[]);return;
+ }
+ const anova=mixedNestedAnova(states),touched=anova.trays.map(t=>t.touchedMean),control=anova.trays.map(t=>t.controlMean);
+ const nt=states.reduce((n,g)=>n+g.data.touched.length,0),nc=states.reduce((n,g)=>n+g.data.control.length,0),shelves=[...new Set(states.map(g=>g.shelf))];
+ analysisSummaryEl.innerHTML="<strong>"+states.length+"</strong> accepted trays/groups are included ("+nt+" touched measurements; "+nc+" control measurements).<br>Shelves represented: <strong>"+shelves.map(escapeHtml).join(", ")+"</strong>. Results update automatically.";
+ if(!anova.rows.length)anovaOutputEl.textContent="At least two accepted trays are needed for inferential tests.";
+ else{
+  let h='<table><thead><tr><th>Source</th><th class="num">df</th><th class="num">SS</th><th class="num">MS</th><th class="num">F</th><th class="num">P</th></tr></thead><tbody>';
+  anova.rows.forEach(r=>{h+="<tr><td>"+escapeHtml(r.source)+'</td><td class="num">'+fmtDf(r.df)+'</td><td class="num">'+fmt(r.ss)+'</td><td class="num">'+fmt(r.ms)+'</td><td class="num">'+fmt(r.F)+'</td><td class="num">'+fmtP(r.p)+"</td></tr>"});
+  h+="</tbody></table>";
+  if(anova.S<2)h+='<div class="note">Only one shelf is represented so far. Shelf and Shelf × Treatment cannot be tested yet.</div>';
+  else if(anova.N-anova.S<=0)h+='<div class="note">There is not yet replication within shelves, so denominator error terms are not estimable.</div>';
+  anovaOutputEl.innerHTML=h;
+ }
+ updateChart(touched,control);
+}
+
+const whiteBg={id:"whiteBackground",beforeDraw(chart){const{ctx,width,height}=chart;ctx.save();ctx.globalCompositeOperation="destination-over";ctx.fillStyle="white";ctx.fillRect(0,0,width,height);ctx.restore()}};
+const errorBars={id:"errorBars",afterDatasetsDraw(chart){const{ctx,scales}=chart,d=chart.data.datasets[0],meta=chart.getDatasetMeta(0);if(!d?.errors||!meta?.data)return;ctx.save();ctx.strokeStyle="#222";ctx.lineWidth=1.5;meta.data.forEach((bar,i)=>{const v=d.data[i],e=d.errors[i]||0,x=bar.x,yt=scales.y.getPixelForValue(v+e),yb=scales.y.getPixelForValue(Math.max(0,v-e)),cap=8;ctx.beginPath();ctx.moveTo(x,yt);ctx.lineTo(x,yb);ctx.moveTo(x-cap,yt);ctx.lineTo(x+cap,yt);ctx.moveTo(x-cap,yb);ctx.lineTo(x+cap,yb);ctx.stroke()});ctx.restore()}};
+
+function updateChart(touched,control){
+ if(chart){chart.destroy();chart=null}
+ if(!touched.length||!control.length){downloadChartBtn.disabled=true;return}
+ const data=[mean(touched),mean(control)],errors=[se(touched),se(control)];
+ chart=new Chart(el("chartCanvas"),{
+  type:"bar",
+  data:{labels:["Touched","Control"],datasets:[{label:"Mean height (cm)",data,errors,backgroundColor:["rgba(70,120,180,.70)","rgba(120,120,120,.70)"],borderColor:["rgba(70,120,180,1)","rgba(120,120,120,1)"],borderWidth:1.5}]},
+  options:{responsive:true,maintainAspectRatio:true,animation:false,plugins:{title:{display:true,text:"Lima bean height: touched vs. control"},legend:{display:false},tooltip:{callbacks:{label:c=>"Mean = "+data[c.dataIndex].toFixed(2)+" cm; SE = "+errors[c.dataIndex].toFixed(2)+" cm"}}},scales:{y:{beginAtZero:true,title:{display:true,text:"Height (cm)"}},x:{title:{display:true,text:"Treatment"}}}},
+  plugins:[whiteBg,errorBars]
+ });
+ downloadChartBtn.disabled=false;
+}
+downloadChartBtn.addEventListener("click",()=>{if(!chart)return;const a=document.createElement("a");a.download="lima_bean_touched_vs_control.png";a.href=chart.toBase64Image("image/png",1);a.click()});
+
+function fmtDf(x){return Number.isFinite(x)&&x>=0?String(x):"—"}
+function fmt(x){if(x==null||Number.isNaN(x))return"—";if(x===Infinity)return"∞";return Number.isFinite(x)?x.toFixed(3):"—"}
+function fmtP(p){if(p==null||Number.isNaN(p))return"—";return p<.001?"<0.001":p.toFixed(3)}
+function escapeHtml(v){return String(v).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#039;")}
+</script>
+</body>
+</html>
