@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
 <title>Lima Bean Experiment — Instructor Control Panel</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jstat@1.9.6/dist/jstat.min.js"></script>
 <style>
 :root{--border:#d8d8d8;--muted:#666;--bg:#f7f7f7;--ok:#e8f5e9;--okText:#1b5e20;--warn:#fff8e1;--warnText:#7a5300;--bad:#ffebee;--badText:#8e1b1b}
 *{box-sizing:border-box}body{font-family:Arial,Helvetica,sans-serif;line-height:1.45;margin:0;color:#222;background:#fff}
@@ -17,6 +19,7 @@ button{border:1px solid #555;border-radius:7px;padding:10px 14px;cursor:pointer;
 button:disabled{opacity:.5;cursor:not-allowed}.primary{background:#222;color:#fff;border-color:#222}.danger{background:#8e1b1b;color:#fff;border-color:#8e1b1b}
 .grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.small{color:var(--muted);font-size:.92rem}
 table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid var(--border);padding:8px;text-align:left}th{background:#f1f1f1}
+.chart-wrap{max-width:760px;margin:16px auto}.chart-wrap canvas{width:100%;max-height:520px}.graph-status{margin:10px 0}
 [hidden]{display:none!important}
 @media(max-width:700px){.grid2{grid-template-columns:1fr}}
 </style>
@@ -65,8 +68,32 @@ table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid
 
 <div class="card">
 <h2>Current submissions</h2>
-<button id="refreshBtn">Refresh counts</button>
+<button id="refreshBtn">Refresh counts and graphs</button>
 <div id="countsOutput">Loading…</div>
+</div>
+
+<div class="card">
+<h2>Download graphs</h2>
+
+<div class="card">
+<h2>Individual group graph</h2>
+<label for="graphGroupSelect">Group</label>
+<select id="graphGroupSelect"></select>
+<div id="groupGraphStatus" class="graph-status small">Loading group status…</div>
+<div id="groupGraphArea" hidden>
+<div class="chart-wrap"><canvas id="groupChartCanvas"></canvas></div>
+<button id="downloadGroupChartBtn" class="primary">Download selected group graph</button>
+</div>
+</div>
+
+<div class="card">
+<h2>Running class graph</h2>
+<div id="classGraphStatus" class="graph-status small">Loading accepted class data…</div>
+<div id="classGraphArea" hidden>
+<div class="chart-wrap"><canvas id="classChartCanvas"></canvas></div>
+<button id="downloadClassChartBtn" class="primary">Download current class graph</button>
+</div>
+</div>
 </div>
 
 <button id="logoutBtn">Sign out</button>
@@ -98,6 +125,10 @@ const loginCard=el("loginCard"),adminCard=el("adminCard"),emailEl=el("email"),pa
 loginBtn=el("loginBtn"),loginStatus=el("loginStatus"),authStatus=el("authStatus"),
 groupSelect=el("groupSelect"),groupCount=el("groupCount"),clearGroupBtn=el("clearGroupBtn"),
 clearAllBtn=el("clearAllBtn"),refreshBtn=el("refreshBtn"),countsOutput=el("countsOutput"),
+graphGroupSelect=el("graphGroupSelect"),groupGraphStatus=el("groupGraphStatus"),groupGraphArea=el("groupGraphArea"),
+groupChartCanvas=el("groupChartCanvas"),downloadGroupChartBtn=el("downloadGroupChartBtn"),
+classGraphStatus=el("classGraphStatus"),classGraphArea=el("classGraphArea"),
+classChartCanvas=el("classChartCanvas"),downloadClassChartBtn=el("downloadClassChartBtn"),
 logoutBtn=el("logoutBtn"),actionStatus=el("actionStatus");
 
 ALL_GROUPS.forEach(g=>{
@@ -105,13 +136,18 @@ ALL_GROUPS.forEach(g=>{
  o.value=String(g);
  o.textContent="Group "+g;
  groupSelect.appendChild(o);
+
+ const go=document.createElement("option");
+ go.value=String(g);
+ go.textContent="Group "+g;
+ graphGroupSelect.appendChild(go);
 });
 
 const app=initializeApp(firebaseConfig);
 const auth=getAuth(app);
 const db=getFirestore(app);
 
-let cachedDocs=[];
+let cachedDocs=[],groupStates=[],groupChart=null,classChart=null;
 
 function setAction(message,type="ok"){
  actionStatus.className="status "+type;
@@ -127,12 +163,259 @@ function escapeHtml(v){
   .replaceAll("'","&#039;");
 }
 
+function normalizeNickname(value){
+ return String(value||"").trim().replace(/\s+/g," ").toLowerCase();
+}
+
+function signatureOf(s){
+ return JSON.stringify({
+  touched:Array.isArray(s.touched)?[...s.touched].sort((a,b)=>a-b):[],
+  control:Array.isArray(s.control)?[...s.control].sort((a,b)=>a-b):[]
+ });
+}
+
+function buildGroupStates(submissions){
+ const byGroup=new Map();
+
+ submissions.forEach(s=>{
+  const g=Number(s.group);
+  if(Number.isInteger(g)&&ALL_GROUPS.includes(g)){
+   if(!byGroup.has(g))byGroup.set(g,[]);
+   byGroup.get(g).push(s);
+  }
+ });
+
+ return ALL_GROUPS.map(group=>{
+  const rows=(byGroup.get(group)||[]).sort((a,b)=>
+   String(a.nickname||"").localeCompare(String(b.nickname||""))
+  );
+
+  if(!rows.length)return{group,rows,status:"none",accepted:false,expectedMembers:null};
+
+  const expectedSet=[...new Set(rows.map(r=>Number(r.expectedMembers)))];
+  if(expectedSet.length!==1||!Number.isInteger(expectedSet[0])){
+   return{group,rows,status:"mismatch",accepted:false,expectedMembers:null,reason:"Reported group sizes do not match."};
+  }
+
+  const expectedMembers=expectedSet[0];
+  const names=rows.map(r=>normalizeNickname(r.nickname));
+  if(names.some(n=>!n)){
+   return{group,rows,status:"mismatch",accepted:false,expectedMembers,reason:"One or more nicknames are missing."};
+  }
+  if(new Set(names).size!==rows.length){
+   return{group,rows,status:"mismatch",accepted:false,expectedMembers,reason:"Duplicate anonymous nicknames are present."};
+  }
+  if(rows.length>expectedMembers){
+   return{group,rows,status:"mismatch",accepted:false,expectedMembers,reason:"More submissions than the reported group size."};
+  }
+
+  const validArrays=rows.every(r=>Array.isArray(r.touched)&&r.touched.length&&Array.isArray(r.control)&&r.control.length);
+  if(!validArrays){
+   return{group,rows,status:"mismatch",accepted:false,expectedMembers,reason:"One or more submissions are missing plant-height data."};
+  }
+
+  const signatures=[...new Set(rows.map(signatureOf))];
+  if(signatures.length>1){
+   return{group,rows,status:"mismatch",accepted:false,expectedMembers,reason:"Submitted height datasets do not match."};
+  }
+  if(rows.length<expectedMembers){
+   return{group,rows,status:"waiting",accepted:false,expectedMembers,reason:"Waiting for all group members."};
+  }
+
+  return{
+   group,rows,status:"accepted",accepted:true,expectedMembers,
+   data:{touched:[...rows[0].touched],control:[...rows[0].control]}
+  };
+ });
+}
+
+function mean(v){return v.reduce((a,b)=>a+b,0)/v.length}
+function variance(v){if(v.length<2)return NaN;const m=mean(v);return v.reduce((s,x)=>s+(x-m)**2,0)/(v.length-1)}
+function se(v){return v.length<2?0:Math.sqrt(variance(v)/v.length)}
+
+function twoSampleTTest(touched,control){
+ const n1=touched.length,n2=control.length;
+ if(n1<2||n2<2)return null;
+
+ const m1=mean(touched),m2=mean(control);
+ const v1=variance(touched),v2=variance(control);
+ const df=n1+n2-2;
+ const pooledVariance=(((n1-1)*v1)+((n2-1)*v2))/df;
+ const seDifference=Math.sqrt(pooledVariance*((1/n1)+(1/n2)));
+
+ let t,p;
+ if(seDifference===0){
+  if(m1===m2){t=0;p=1;}
+  else{t=m1>m2?Infinity:-Infinity;p=0;}
+ }else{
+  t=(m1-m2)/seDifference;
+  p=2*(1-window.jStat.studentt.cdf(Math.abs(t),df));
+  p=Math.max(0,Math.min(1,p));
+ }
+ return{t,df,p};
+}
+
+function formatP(p){
+ if(p==null||Number.isNaN(p))return"—";
+ if(p<0.001)return"< 0.001";
+ return p.toFixed(3);
+}
+
+const whiteBg={
+ id:"whiteBackground",
+ beforeDraw(chart){
+  const{ctx,width,height}=chart;
+  ctx.save();
+  ctx.globalCompositeOperation="destination-over";
+  ctx.fillStyle="white";
+  ctx.fillRect(0,0,width,height);
+  ctx.restore();
+ }
+};
+
+const errorBars={
+ id:"errorBars",
+ afterDatasetsDraw(chart){
+  const{ctx,scales}=chart,d=chart.data.datasets[0],meta=chart.getDatasetMeta(0);
+  if(!d?.errors||!meta?.data)return;
+  ctx.save();
+  ctx.strokeStyle="#222";
+  ctx.lineWidth=1.5;
+  meta.data.forEach((bar,i)=>{
+   const v=d.data[i],e=d.errors[i]||0,x=bar.x;
+   const yt=scales.y.getPixelForValue(v+e);
+   const yb=scales.y.getPixelForValue(Math.max(0,v-e));
+   const cap=8;
+   ctx.beginPath();
+   ctx.moveTo(x,yt);ctx.lineTo(x,yb);
+   ctx.moveTo(x-cap,yt);ctx.lineTo(x+cap,yt);
+   ctx.moveTo(x-cap,yb);ctx.lineTo(x+cap,yb);
+   ctx.stroke();
+  });
+  ctx.restore();
+ }
+};
+
+const pValuePlugin={
+ id:"pValue",
+ afterDraw(chart,args,options){
+  if(options.p==null)return;
+  const{ctx,chartArea}=chart;
+  if(!chartArea)return;
+  ctx.save();
+  ctx.fillStyle="#222";
+  ctx.font="bold 16px Arial";
+  ctx.textAlign="center";
+  ctx.textBaseline="top";
+  ctx.fillText("P = "+formatP(options.p),(chartArea.left+chartArea.right)/2,chartArea.top+8);
+  ctx.restore();
+ }
+};
+
+function makeChart(canvas,touched,control,subtitleLines){
+ const data=[mean(touched),mean(control)];
+ const errors=[se(touched),se(control)];
+ const result=twoSampleTTest(touched,control);
+ const upper=Math.max(data[0]+errors[0],data[1]+errors[1]);
+ const yMax=upper>0?upper*1.28:1;
+
+ return new Chart(canvas,{
+  type:"bar",
+  data:{
+   labels:["Touched","Untouched"],
+   datasets:[{
+    label:"Mean height (cm)",
+    data,
+    errors,
+    backgroundColor:["rgba(70,120,180,.70)","rgba(120,120,120,.70)"],
+    borderColor:["rgba(70,120,180,1)","rgba(120,120,120,1)"],
+    borderWidth:1.5
+   }]
+  },
+  options:{
+   responsive:true,
+   maintainAspectRatio:true,
+   animation:false,
+   plugins:{
+    title:{display:true,text:"Lima bean height: touched vs. untouched"},
+    subtitle:{
+     display:true,
+     text:subtitleLines,
+     font:{weight:"bold",size:14},
+     padding:{bottom:12}
+    },
+    legend:{display:false},
+    pValue:{p:result?result.p:null},
+    tooltip:{callbacks:{label:context=>{
+     const i=context.dataIndex;
+     return "Mean = "+data[i].toFixed(2)+" cm; SE = "+errors[i].toFixed(2)+" cm";
+    }}}
+   },
+   scales:{
+    y:{beginAtZero:true,suggestedMax:yMax,title:{display:true,text:"Height (cm)"}},
+    x:{title:{display:true,text:"Treatment"}}
+   }
+  },
+  plugins:[whiteBg,errorBars,pValuePlugin]
+ });
+}
+
+function renderGraphs(){
+ const selectedGroup=Number(graphGroupSelect.value);
+ const gs=groupStates.find(g=>g.group===selectedGroup);
+
+ if(groupChart){groupChart.destroy();groupChart=null}
+ if(classChart){classChart.destroy();classChart=null}
+
+ if(gs&&gs.accepted){
+  groupGraphArea.hidden=false;
+  groupGraphStatus.className="graph-status status ok";
+  groupGraphStatus.textContent="Group "+selectedGroup+" is Accepted. This graph uses only Group "+selectedGroup+"'s plant measurements.";
+  groupChart=makeChart(
+   groupChartCanvas,
+   gs.data.touched,
+   gs.data.control,
+   ["Group "+selectedGroup+" only","Accepted group dataset"]
+  );
+ }else{
+  groupGraphArea.hidden=true;
+  groupGraphStatus.className="graph-status status "+(gs&&gs.status==="mismatch"?"bad":"warn");
+  if(!gs||gs.status==="none"){
+   groupGraphStatus.textContent="Group "+selectedGroup+" has no submissions.";
+  }else if(gs.status==="waiting"){
+   groupGraphStatus.textContent="Group "+selectedGroup+" is not yet Accepted: waiting for all group members.";
+  }else{
+   groupGraphStatus.textContent="Group "+selectedGroup+" is not Accepted: "+(gs.reason||"submission mismatch.");
+  }
+ }
+
+ const accepted=groupStates.filter(g=>g.accepted);
+ if(accepted.length){
+  const touched=accepted.flatMap(g=>g.data.touched);
+  const control=accepted.flatMap(g=>g.data.control);
+  classGraphArea.hidden=false;
+  classGraphStatus.className="graph-status status ok";
+  classGraphStatus.textContent=accepted.length+" accepted group"+(accepted.length===1?" is":"s are")+" included in the current class graph.";
+  classChart=makeChart(
+   classChartCanvas,
+   touched,
+   control,
+   ["Current class analysis","Total accepted groups included: "+accepted.length]
+  );
+ }else{
+  classGraphArea.hidden=true;
+  classGraphStatus.className="graph-status status warn";
+  classGraphStatus.textContent="No accepted groups are currently available for the class graph.";
+ }
+}
+
 async function refreshCounts(){
  countsOutput.textContent="Loading…";
  groupCount.textContent="Loading submission count…";
 
  const snap=await getDocs(collection(db,COLLECTION_NAME));
  cachedDocs=snap.docs.map(d=>({ref:d.ref,id:d.id,...d.data()}));
+ groupStates=buildGroupStates(cachedDocs);
 
  const counts=new Map(ALL_GROUPS.map(g=>[g,0]));
  for(const d of cachedDocs){
@@ -147,6 +430,7 @@ async function refreshCounts(){
  html+="<tr><th>Total</th><th>"+cachedDocs.length+"</th></tr></tbody></table>";
  countsOutput.innerHTML=html;
  updateSelectedCount();
+ renderGraphs();
 }
 
 function updateSelectedCount(){
@@ -194,6 +478,25 @@ refreshBtn.addEventListener("click",async()=>{
  }
 });
 groupSelect.addEventListener("change",updateSelectedCount);
+graphGroupSelect.addEventListener("change",renderGraphs);
+
+downloadGroupChartBtn.addEventListener("click",()=>{
+ const g=Number(graphGroupSelect.value);
+ if(!groupChart)return;
+ const a=document.createElement("a");
+ a.download="lima_bean_group_"+g+"_individual_results.png";
+ a.href=groupChart.toBase64Image("image/png",1);
+ a.click();
+});
+
+downloadClassChartBtn.addEventListener("click",()=>{
+ const n=groupStates.filter(g=>g.accepted).length;
+ if(!classChart||!n)return;
+ const a=document.createElement("a");
+ a.download="lima_bean_class_results_"+n+"_accepted_groups.png";
+ a.href=classChart.toBase64Image("image/png",1);
+ a.click();
+});
 
 clearGroupBtn.addEventListener("click",async()=>{
  const g=Number(groupSelect.value);
