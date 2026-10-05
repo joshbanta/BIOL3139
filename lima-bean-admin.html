@@ -480,22 +480,45 @@ refreshBtn.addEventListener("click",async()=>{
 groupSelect.addEventListener("change",updateSelectedCount);
 graphGroupSelect.addEventListener("change",renderGraphs);
 
-downloadGroupChartBtn.addEventListener("click",()=>{
+downloadGroupChartBtn.addEventListener("click",async()=>{
  const g=Number(graphGroupSelect.value);
- if(!groupChart)return;
- const a=document.createElement("a");
- a.download="lima_bean_group_"+g+"_individual_results.png";
- a.href=groupChart.toBase64Image("image/png",1);
- a.click();
+ downloadGroupChartBtn.disabled=true;
+ try{
+  await refreshCounts();
+  const gs=groupStates.find(x=>x.group===g);
+  if(!gs||!gs.accepted||!groupChart){
+   setAction("Group "+g+" is not currently Accepted, so no individual graph was downloaded.","warn");
+   return;
+  }
+  const a=document.createElement("a");
+  a.download="lima_bean_group_"+g+"_individual_results.png";
+  a.href=groupChart.toBase64Image("image/png",1);
+  a.click();
+ }catch(err){
+  setAction("Could not prepare Group "+g+" graph: "+err.message,"bad");
+ }finally{
+  downloadGroupChartBtn.disabled=false;
+ }
 });
 
-downloadClassChartBtn.addEventListener("click",()=>{
- const n=groupStates.filter(g=>g.accepted).length;
- if(!classChart||!n)return;
- const a=document.createElement("a");
- a.download="lima_bean_class_results_"+n+"_accepted_groups.png";
- a.href=classChart.toBase64Image("image/png",1);
- a.click();
+downloadClassChartBtn.addEventListener("click",async()=>{
+ downloadClassChartBtn.disabled=true;
+ try{
+  await refreshCounts();
+  const n=groupStates.filter(g=>g.accepted).length;
+  if(!classChart||!n){
+   setAction("There are no Accepted groups available for the class graph.","warn");
+   return;
+  }
+  const a=document.createElement("a");
+  a.download="lima_bean_class_results_"+n+"_accepted_groups.png";
+  a.href=classChart.toBase64Image("image/png",1);
+  a.click();
+ }catch(err){
+  setAction("Could not prepare the current class graph: "+err.message,"bad");
+ }finally{
+  downloadClassChartBtn.disabled=false;
+ }
 });
 
 clearGroupBtn.addEventListener("click",async()=>{
