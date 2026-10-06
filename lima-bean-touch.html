@@ -53,6 +53,23 @@ table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid
 <button id="submitBtn" class="primary" disabled>Submit / update my entry</button>
 <button id="clearBtn" disabled>Delete my submission</button>
 <div id="submitStatus"></div>
+
+<div class="note" style="margin-top:18px">
+<strong>Already submitted, but this browser forgot you?</strong>
+<p class="small">Recover your previous submission using the same group number and anonymous nickname you originally used. This restores graph access on this browser without creating a duplicate submission.</p>
+<div class="grid2">
+<div>
+<label for="recoveryGroup">Group number</label>
+<select id="recoveryGroup"></select>
+</div>
+<div>
+<label for="recoveryNickname">Anonymous nickname</label>
+<input id="recoveryNickname" type="text" maxlength="40" autocomplete="off" placeholder="The same nickname you originally used">
+</div>
+</div>
+<button id="recoverBtn" style="margin-top:10px" disabled>Recover previous submission</button>
+<div id="recoveryStatus"></div>
+</div>
 </section>
 
 <section class="card">
@@ -95,6 +112,7 @@ const firebaseConfig={
 
 const COLLECTION_NAME="limaBeanTouch_Fall2026";
 const LAST_GROUP_KEY="limaBeanTouch_Fall2026_lastGroup";
+const RECOVERED_SUBMISSION_KEY="limaBeanTouch_Fall2026_recoveredSubmissionId";
 
 const ALL_GROUPS=Array.from({length:20},(_,i)=>i+1);
 
@@ -105,12 +123,25 @@ confirmConsensusEl=el("confirmConsensus"),
 submitBtn=el("submitBtn"),clearBtn=el("clearBtn"),submitStatusEl=el("submitStatus"),
 connectionStatusEl=el("connectionStatus"),groupSummaryEl=el("groupSummary"),
 analysisSummaryEl=el("analysisSummary"),testOutputEl=el("testOutput"),
-graphGateEl=el("graphGate"),graphAreaEl=el("graphArea"),downloadChartBtn=el("downloadChartBtn");
+graphGateEl=el("graphGate"),graphAreaEl=el("graphArea"),downloadChartBtn=el("downloadChartBtn"),
+recoveryGroupEl=el("recoveryGroup"),recoveryNicknameEl=el("recoveryNickname"),
+recoverBtn=el("recoverBtn"),recoveryStatusEl=el("recoveryStatus");
 
-ALL_GROUPS.forEach(g=>{const o=document.createElement("option");o.value=g;o.textContent="Group "+g;groupNumberEl.appendChild(o)});
+ALL_GROUPS.forEach(g=>{
+ const o=document.createElement("option");
+ o.value=g;
+ o.textContent="Group "+g;
+ groupNumberEl.appendChild(o);
+
+ const r=document.createElement("option");
+ r.value=g;
+ r.textContent="Group "+g;
+ recoveryGroupEl.appendChild(r);
+});
 groupNumberEl.addEventListener("change",()=>{
  safeStorageSet(LAST_GROUP_KEY,String(groupNumberEl.value));
  loadOwnSubmissionForSelectedGroup();
+ updateEntryControls();
  renderAll();
 });
 
@@ -132,8 +163,7 @@ try{
  onAuthStateChanged(auth,user=>{
   if(user){
    currentUser=user;
-   submitBtn.disabled=false;
-   clearBtn.disabled=false;
+   updateEntryControls();
    connectionStatusEl.className="status ok";
    connectionStatusEl.textContent="Connected. This browser will remember your saved submission and accepted graph.";
    startRealtime();
@@ -158,6 +188,7 @@ function startRealtime(){
  if(!db||unsubscribe)return;
  unsubscribe=onSnapshot(collection(db,COLLECTION_NAME),snap=>{
   liveSubmissions=snap.docs.map(d=>({id:d.id,...d.data()}));
+  recoverBtn.disabled=false;
 
   if(!restoredOwnSubmission){
    restoreOwnSubmissionOnLoad();
@@ -185,6 +216,48 @@ function safeStorageRemove(key){
 function ownSubmissions(){
  if(!currentUser)return[];
  return liveSubmissions.filter(s=>s.ownerUid===currentUser.uid);
+}
+
+function recoveredSubmission(){
+ const id=safeStorageGet(RECOVERED_SUBMISSION_KEY);
+ if(!id)return null;
+ const s=liveSubmissions.find(x=>x.id===id)||null;
+ if(!s)safeStorageRemove(RECOVERED_SUBMISSION_KEY);
+ return s;
+}
+
+function recognizedSubmissionForGroup(group){
+ if(!currentUser)return null;
+
+ const own=liveSubmissions.find(
+  s=>Number(s.group)===Number(group)&&s.ownerUid===currentUser.uid
+ );
+ if(own)return{submission:own,recovered:false};
+
+ const recovered=recoveredSubmission();
+ if(recovered&&Number(recovered.group)===Number(group)){
+  return{submission:recovered,recovered:true};
+ }
+
+ return null;
+}
+
+function updateEntryControls(){
+ if(!currentUser){
+  submitBtn.disabled=true;
+  clearBtn.disabled=true;
+  return;
+ }
+
+ const group=Number(groupNumberEl.value);
+ const recognized=recognizedSubmissionForGroup(group);
+ const isRecovered=Boolean(recognized&&recognized.recovered);
+ const hasOwn=Boolean(recognized&&!recognized.recovered);
+
+ // A recovered legacy submission belongs to an older anonymous Firebase
+ // identity. Keep it read-only so we never create a duplicate record.
+ submitBtn.disabled=isRecovered;
+ clearBtn.disabled=!hasOwn;
 }
 
 function timestampSeconds(value){
@@ -216,13 +289,17 @@ function clearEntryForm(){
 function loadOwnSubmissionForSelectedGroup(){
  if(!currentUser)return;
  const group=Number(groupNumberEl.value);
- const own=liveSubmissions.find(s=>s.ownerUid===currentUser.uid&&Number(s.group)===group);
+ const recognized=recognizedSubmissionForGroup(group);
 
- if(own){
-  populateFormFromSubmission(own);
+ if(recognized){
+  populateFormFromSubmission(recognized.submission);
+  if(recognized.recovered){
+   submitStatusEl.innerHTML='<div class="status ok"><strong>Recovered previous submission.</strong> Your saved Group '+group+' entry is restored on this browser. It is read-only under the new browser identity, but your graph access is restored.</div>';
+  }
  }else{
   clearEntryForm();
  }
+ updateEntryControls();
 }
 
 function restoreOwnSubmissionOnLoad(){
@@ -241,13 +318,67 @@ function restoreOwnSubmissionOnLoad(){
   }
 
   populateFormFromSubmission(chosen);
+  recoveryGroupEl.value=String(chosen.group);
   submitStatusEl.innerHTML='<div class="status ok">Welcome back. Your saved submission for <strong>Group '+chosen.group+'</strong> was restored on this browser.</div>';
- }else if(Number.isInteger(rememberedGroup)&&ALL_GROUPS.includes(rememberedGroup)){
-  groupNumberEl.value=String(rememberedGroup);
+ }else{
+  const recovered=recoveredSubmission();
+
+  if(recovered){
+   populateFormFromSubmission(recovered);
+   recoveryGroupEl.value=String(recovered.group);
+   recoveryNicknameEl.value=recovered.nickname||"";
+   submitStatusEl.innerHTML='<div class="status ok"><strong>Recovered previous submission.</strong> Your saved Group '+recovered.group+' entry was restored on this browser, and your graph will be available whenever the group is Accepted.</div>';
+  }else if(Number.isInteger(rememberedGroup)&&ALL_GROUPS.includes(rememberedGroup)){
+   groupNumberEl.value=String(rememberedGroup);
+   recoveryGroupEl.value=String(rememberedGroup);
+  }
  }
 
+ updateEntryControls();
  renderAll();
 }
+
+recoverBtn.addEventListener("click",()=>{
+ recoveryStatusEl.innerHTML="";
+
+ const group=Number(recoveryGroupEl.value);
+ const nickname=recoveryNicknameEl.value.trim().replace(/\s+/g," ");
+
+ if(!nickname){
+  recoveryStatusEl.innerHTML='<div class="status bad">Enter the anonymous nickname you originally used.</div>';
+  return;
+ }
+
+ const matches=liveSubmissions.filter(s=>
+  Number(s.group)===group &&
+  normalizeNickname(s.nickname||"")===normalizeNickname(nickname)
+ );
+
+ if(matches.length===0){
+  recoveryStatusEl.innerHTML='<div class="status bad">No saved submission matched that group number and anonymous nickname. Check both entries exactly as you originally used them.</div>';
+  return;
+ }
+
+ if(matches.length>1){
+  recoveryStatusEl.innerHTML='<div class="status bad">More than one saved submission matches that group and nickname. Ask your instructor to resolve the duplicate before recovery.</div>';
+  return;
+ }
+
+ const match=matches[0];
+ safeStorageSet(RECOVERED_SUBMISSION_KEY,match.id);
+ safeStorageSet(LAST_GROUP_KEY,String(group));
+
+ groupNumberEl.value=String(group);
+ populateFormFromSubmission(match);
+ updateEntryControls();
+ renderAll();
+
+ if(match.ownerUid===currentUser?.uid){
+  recoveryStatusEl.innerHTML='<div class="status ok">Your existing submission was found and restored. This browser already has the original Firebase identity.</div>';
+ }else{
+  recoveryStatusEl.innerHTML='<div class="status ok"><strong>Recovered.</strong> Your previous Group '+group+' submission is now remembered on this browser. If the group is Accepted, the class graph is available again below.</div>';
+ }
+});
 
 function parseHeights(text,label){
  const cleaned=text.trim();
@@ -272,6 +403,11 @@ submitBtn.addEventListener("click",async()=>{
 
  try{
   const group=Number(groupNumberEl.value);
+  const recognized=recognizedSubmissionForGroup(group);
+  if(recognized&&recognized.recovered){
+   throw new Error("This is a recovered previous submission. It is read-only on this browser so a duplicate record cannot be created.");
+  }
+
   const expectedMembers=Number(groupSizeEl.value);
   const nickname=nicknameEl.value.trim().replace(/\s+/g," ");
 
@@ -322,6 +458,8 @@ submitBtn.addEventListener("click",async()=>{
   });
 
   safeStorageSet(LAST_GROUP_KEY,String(group));
+  safeStorageRemove(RECOVERED_SUBMISSION_KEY);
+  updateEntryControls();
   confirmConsensusEl.checked=false;
   submitStatusEl.innerHTML='<div class="status ok">Your anonymous entry as <strong>'+escapeHtml(nickname)+'</strong> in Group '+group+' was saved. This browser will remember your submission when you return. If your group is not accepted, confer with your group and correct any disagreement.</div>';
  }catch(err){
@@ -344,7 +482,12 @@ clearBtn.addEventListener("click",async()=>{
 
   await deleteDoc(ref);
   if(Number(safeStorageGet(LAST_GROUP_KEY))===group)safeStorageRemove(LAST_GROUP_KEY);
+  const recovered=recoveredSubmission();
+  if(recovered&&recovered.ownerUid===currentUser.uid&&Number(recovered.group)===group){
+   safeStorageRemove(RECOVERED_SUBMISSION_KEY);
+  }
   clearEntryForm();
+  updateEntryControls();
   submitStatusEl.innerHTML='<div class="status ok">Your saved entry was deleted.</div>';
  }catch(err){
   console.error(err);
@@ -545,9 +688,8 @@ function renderAnalysis(allStates){
 function renderGraphGate(allStates,touched,control,pValue){
  const selectedGroup=Number(groupNumberEl.value);
  const groupState=allStates.find(g=>g.group===selectedGroup);
- const ownSubmission=currentUser
-  ?liveSubmissions.find(s=>s.group===selectedGroup&&s.ownerUid===currentUser.uid)
-  :null;
+ const recognized=recognizedSubmissionForGroup(selectedGroup);
+ const ownSubmission=recognized?recognized.submission:null;
 
  const allowed=Boolean(ownSubmission&&groupState&&groupState.accepted);
 
@@ -560,7 +702,7 @@ function renderGraphGate(allStates,touched,control,pValue){
 
   if(!ownSubmission){
    graphGateEl.className="note";
-   graphGateEl.innerHTML="<strong>Graph locked.</strong> Submit your own entry for Group "+selectedGroup+". The graph will unlock only after your submission is present and the entire group is Accepted.";
+   graphGateEl.innerHTML="<strong>Graph locked.</strong> Submit your own entry for Group "+selectedGroup+", or use <strong>Recover previous submission</strong> above if you already submitted earlier. The graph unlocks after your submission is recognized and the entire group is Accepted.";
   }else if(groupState&&groupState.status==="waiting"){
    graphGateEl.className="status warn";
    graphGateEl.innerHTML="<strong>Graph locked for Group "+selectedGroup+".</strong> Your submission is present, but the group is still waiting for all members. Confer with your group and make sure everyone submits the same group size and complete dataset.";
