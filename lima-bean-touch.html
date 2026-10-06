@@ -80,7 +80,7 @@ table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid
 
 <script type="module">
 import{initializeApp}from"https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
-import{getAuth,signInAnonymously,onAuthStateChanged}from"https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
+import{getAuth,signInAnonymously,onAuthStateChanged,setPersistence,browserLocalPersistence}from"https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
 import{getFirestore,collection,doc,setDoc,deleteDoc,getDoc,onSnapshot,serverTimestamp}from"https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
 
 const firebaseConfig={
@@ -94,6 +94,7 @@ const firebaseConfig={
 };
 
 const COLLECTION_NAME="limaBeanTouch_Fall2026";
+const LAST_GROUP_KEY="limaBeanTouch_Fall2026_lastGroup";
 
 const ALL_GROUPS=Array.from({length:20},(_,i)=>i+1);
 
@@ -107,14 +108,26 @@ analysisSummaryEl=el("analysisSummary"),testOutputEl=el("testOutput"),
 graphGateEl=el("graphGate"),graphAreaEl=el("graphArea"),downloadChartBtn=el("downloadChartBtn");
 
 ALL_GROUPS.forEach(g=>{const o=document.createElement("option");o.value=g;o.textContent="Group "+g;groupNumberEl.appendChild(o)});
-groupNumberEl.addEventListener("change",()=>renderAll());
+groupNumberEl.addEventListener("change",()=>{
+ safeStorageSet(LAST_GROUP_KEY,String(groupNumberEl.value));
+ loadOwnSubmissionForSelectedGroup();
+ renderAll();
+});
 
 let db=null,auth=null,currentUser=null,unsubscribe=null,liveSubmissions=[],chart=null,currentGraphGroup=null;
+let restoredOwnSubmission=false;
 
 try{
  const app=initializeApp(firebaseConfig);
  db=getFirestore(app);
  auth=getAuth(app);
+
+ // Keep the same anonymous Firebase identity on this browser/profile.
+ try{
+  await setPersistence(auth,browserLocalPersistence);
+ }catch(persistenceErr){
+  console.warn("Browser-local Firebase persistence was unavailable; continuing with the browser's available persistence.",persistenceErr);
+ }
 
  onAuthStateChanged(auth,user=>{
   if(user){
@@ -122,12 +135,19 @@ try{
    submitBtn.disabled=false;
    clearBtn.disabled=false;
    connectionStatusEl.className="status ok";
-   connectionStatusEl.textContent="Connected. Class results update automatically as accepted group data arrive.";
+   connectionStatusEl.textContent="Connected. This browser will remember your saved submission and accepted graph.";
    startRealtime();
   }
  });
 
- await signInAnonymously(auth);
+ // Wait for Firebase to restore any existing browser session BEFORE
+ // creating a new anonymous user.
+ if(typeof auth.authStateReady==="function"){
+  await auth.authStateReady();
+ }
+ if(!auth.currentUser){
+  await signInAnonymously(auth);
+ }
 }catch(err){
  console.error(err);
  connectionStatusEl.className="status bad";
@@ -138,12 +158,95 @@ function startRealtime(){
  if(!db||unsubscribe)return;
  unsubscribe=onSnapshot(collection(db,COLLECTION_NAME),snap=>{
   liveSubmissions=snap.docs.map(d=>({id:d.id,...d.data()}));
-  renderAll();
+
+  if(!restoredOwnSubmission){
+   restoreOwnSubmissionOnLoad();
+   restoredOwnSubmission=true;
+  }else{
+   renderAll();
+  }
  },err=>{
   console.error(err);
   connectionStatusEl.className="status bad";
   connectionStatusEl.textContent="Database read error: "+err.message;
  });
+}
+
+function safeStorageGet(key){
+ try{return window.localStorage.getItem(key)}catch(e){return null}
+}
+function safeStorageSet(key,value){
+ try{window.localStorage.setItem(key,value)}catch(e){}
+}
+function safeStorageRemove(key){
+ try{window.localStorage.removeItem(key)}catch(e){}
+}
+
+function ownSubmissions(){
+ if(!currentUser)return[];
+ return liveSubmissions.filter(s=>s.ownerUid===currentUser.uid);
+}
+
+function timestampSeconds(value){
+ if(!value)return 0;
+ if(typeof value.seconds==="number")return value.seconds;
+ if(typeof value.toMillis==="function")return value.toMillis()/1000;
+ return 0;
+}
+
+function populateFormFromSubmission(s){
+ if(!s)return;
+ groupNumberEl.value=String(s.group);
+ groupSizeEl.value=s.expectedMembers??"";
+ nicknameEl.value=s.nickname??"";
+ touchedDataEl.value=Array.isArray(s.touched)?s.touched.join("\n"):"";
+ controlDataEl.value=Array.isArray(s.control)?s.control.join("\n"):"";
+ confirmConsensusEl.checked=false;
+ safeStorageSet(LAST_GROUP_KEY,String(s.group));
+}
+
+function clearEntryForm(){
+ groupSizeEl.value="";
+ nicknameEl.value="";
+ touchedDataEl.value="";
+ controlDataEl.value="";
+ confirmConsensusEl.checked=false;
+}
+
+function loadOwnSubmissionForSelectedGroup(){
+ if(!currentUser)return;
+ const group=Number(groupNumberEl.value);
+ const own=liveSubmissions.find(s=>s.ownerUid===currentUser.uid&&Number(s.group)===group);
+
+ if(own){
+  populateFormFromSubmission(own);
+ }else{
+  clearEntryForm();
+ }
+}
+
+function restoreOwnSubmissionOnLoad(){
+ const own=ownSubmissions();
+ const rememberedGroup=Number(safeStorageGet(LAST_GROUP_KEY));
+
+ if(own.length){
+  let chosen=null;
+
+  if(Number.isInteger(rememberedGroup)){
+   chosen=own.find(s=>Number(s.group)===rememberedGroup)||null;
+  }
+
+  if(!chosen){
+   chosen=[...own].sort((a,b)=>timestampSeconds(b.updatedAt)-timestampSeconds(a.updatedAt))[0];
+  }
+
+  populateFormFromSubmission(chosen);
+  submitStatusEl.innerHTML='<div class="status ok">Welcome back. Your saved submission for <strong>Group '+chosen.group+'</strong> was restored on this browser.</div>';
+ }else if(Number.isInteger(rememberedGroup)&&ALL_GROUPS.includes(rememberedGroup)){
+  groupNumberEl.value=String(rememberedGroup);
+ }
+
+ renderAll();
 }
 
 function parseHeights(text,label){
@@ -218,8 +321,9 @@ submitBtn.addEventListener("click",async()=>{
    updatedAt:serverTimestamp()
   });
 
+  safeStorageSet(LAST_GROUP_KEY,String(group));
   confirmConsensusEl.checked=false;
-  submitStatusEl.innerHTML='<div class="status ok">Your anonymous entry as <strong>'+escapeHtml(nickname)+'</strong> in Group '+group+' was saved. If your group is not accepted, confer with your group and correct any disagreement.</div>';
+  submitStatusEl.innerHTML='<div class="status ok">Your anonymous entry as <strong>'+escapeHtml(nickname)+'</strong> in Group '+group+' was saved. This browser will remember your submission when you return. If your group is not accepted, confer with your group and correct any disagreement.</div>';
  }catch(err){
   console.error(err);
   submitStatusEl.innerHTML='<div class="status bad">'+escapeHtml(err.message)+'</div>';
@@ -239,6 +343,8 @@ clearBtn.addEventListener("click",async()=>{
   if(!existing.exists())throw new Error("You do not have a saved submission for this group on this browser.");
 
   await deleteDoc(ref);
+  if(Number(safeStorageGet(LAST_GROUP_KEY))===group)safeStorageRemove(LAST_GROUP_KEY);
+  clearEntryForm();
   submitStatusEl.innerHTML='<div class="status ok">Your saved entry was deleted.</div>';
  }catch(err){
   console.error(err);
