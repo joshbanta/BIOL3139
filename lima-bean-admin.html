@@ -73,6 +73,14 @@ table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid
 </div>
 
 <div class="card">
+<h2>Backup current data</h2>
+<p class="small">Download a snapshot of <strong>all</strong> saved Firebase submissions, including accepted, waiting, and mismatched groups.</p>
+<button id="downloadJsonBackupBtn" class="primary">Download complete backup (JSON)</button>
+<button id="downloadTxtBackupBtn">Download readable backup (TXT)</button>
+<div id="backupStatus" class="small"></div>
+</div>
+
+<div class="card">
 <h2>Download graphs</h2>
 
 <div class="card">
@@ -125,6 +133,7 @@ const loginCard=el("loginCard"),adminCard=el("adminCard"),emailEl=el("email"),pa
 loginBtn=el("loginBtn"),loginStatus=el("loginStatus"),authStatus=el("authStatus"),
 groupSelect=el("groupSelect"),groupCount=el("groupCount"),clearGroupBtn=el("clearGroupBtn"),
 clearAllBtn=el("clearAllBtn"),refreshBtn=el("refreshBtn"),countsOutput=el("countsOutput"),
+downloadJsonBackupBtn=el("downloadJsonBackupBtn"),downloadTxtBackupBtn=el("downloadTxtBackupBtn"),backupStatus=el("backupStatus"),
 graphGroupSelect=el("graphGroupSelect"),groupGraphStatus=el("groupGraphStatus"),groupGraphArea=el("groupGraphArea"),
 groupChartCanvas=el("groupChartCanvas"),downloadGroupChartBtn=el("downloadGroupChartBtn"),
 classGraphStatus=el("classGraphStatus"),classGraphArea=el("classGraphArea"),
@@ -161,6 +170,92 @@ function escapeHtml(v){
   .replaceAll(">","&gt;")
   .replaceAll('"',"&quot;")
   .replaceAll("'","&#039;");
+}
+
+function timestampForFilename(){
+ const d=new Date();
+ const pad=n=>String(n).padStart(2,"0");
+ return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate())+"_"+
+        pad(d.getHours())+"-"+pad(d.getMinutes())+"-"+pad(d.getSeconds());
+}
+
+function normalizeUpdatedAt(value){
+ if(!value)return null;
+ try{
+  if(typeof value.toDate==="function")return value.toDate().toISOString();
+  if(typeof value.seconds==="number")return new Date(value.seconds*1000).toISOString();
+ }catch(e){}
+ return null;
+}
+
+function makeBackupSnapshot(){
+ const states=buildGroupStates(cachedDocs);
+ return{
+  backupFormat:"Lima Bean Touch Experiment Firebase snapshot",
+  backupVersion:1,
+  collection:COLLECTION_NAME,
+  exportedAt:new Date().toISOString(),
+  totalSavedSubmissions:cachedDocs.length,
+  acceptedGroups:states.filter(g=>g.accepted).map(g=>g.group),
+  waitingGroups:states.filter(g=>g.status==="waiting").map(g=>g.group),
+  mismatchedGroups:states.filter(g=>g.status==="mismatch").map(g=>g.group),
+  submissions:cachedDocs
+   .map(d=>({
+    documentId:d.id,
+    ownerUid:d.ownerUid??null,
+    group:Number(d.group),
+    expectedMembers:d.expectedMembers??null,
+    nickname:d.nickname??null,
+    confirmedConsensus:d.confirmedConsensus??null,
+    touched:Array.isArray(d.touched)?[...d.touched]:[],
+    control:Array.isArray(d.control)?[...d.control]:[],
+    updatedAt:normalizeUpdatedAt(d.updatedAt)
+   }))
+   .sort((a,b)=>(a.group-b.group)||String(a.nickname||"").localeCompare(String(b.nickname||"")))
+ };
+}
+
+function downloadTextFile(filename,text,mime="text/plain;charset=utf-8"){
+ const blob=new Blob([text],{type:mime});
+ const url=URL.createObjectURL(blob);
+ const a=document.createElement("a");
+ a.href=url;
+ a.download=filename;
+ document.body.appendChild(a);
+ a.click();
+ a.remove();
+ setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+
+function makeReadableBackup(snapshot){
+ const lines=[];
+ lines.push("LIMA BEAN TOUCH EXPERIMENT - FIREBASE BACKUP");
+ lines.push("Exported: "+snapshot.exportedAt);
+ lines.push("Collection: "+snapshot.collection);
+ lines.push("Total saved submissions: "+snapshot.totalSavedSubmissions);
+ lines.push("Accepted groups: "+(snapshot.acceptedGroups.length?snapshot.acceptedGroups.join(", "):"None"));
+ lines.push("Waiting groups: "+(snapshot.waitingGroups.length?snapshot.waitingGroups.join(", "):"None"));
+ lines.push("Mismatched groups: "+(snapshot.mismatchedGroups.length?snapshot.mismatchedGroups.join(", "):"None"));
+ lines.push("");
+
+ for(const g of ALL_GROUPS){
+  const groupSubs=snapshot.submissions.filter(s=>s.group===g);
+  if(!groupSubs.length)continue;
+  lines.push("============================================================");
+  lines.push("GROUP "+g);
+  lines.push("============================================================");
+  for(const s of groupSubs){
+   lines.push("Document ID: "+s.documentId);
+   lines.push("Anonymous nickname: "+(s.nickname??""));
+   lines.push("Reported group size: "+(s.expectedMembers??""));
+   lines.push("Confirmed consensus: "+(s.confirmedConsensus===true?"Yes":s.confirmedConsensus===false?"No":""));
+   lines.push("Touched heights (cm): "+s.touched.join(", "));
+   lines.push("Untouched heights (cm): "+s.control.join(", "));
+   lines.push("Last updated: "+(s.updatedAt??""));
+   lines.push("");
+  }
+ }
+ return lines.join("\n");
 }
 
 function normalizeNickname(value){
@@ -479,6 +574,47 @@ refreshBtn.addEventListener("click",async()=>{
 });
 groupSelect.addEventListener("change",updateSelectedCount);
 graphGroupSelect.addEventListener("change",renderGraphs);
+
+downloadJsonBackupBtn.addEventListener("click",async()=>{
+ downloadJsonBackupBtn.disabled=true;
+ downloadTxtBackupBtn.disabled=true;
+ backupStatus.textContent="Refreshing Firebase data…";
+ try{
+  await refreshCounts();
+  const snapshot=makeBackupSnapshot();
+  downloadTextFile(
+   "lima_bean_firebase_backup_"+timestampForFilename()+".json",
+   JSON.stringify(snapshot,null,2),
+   "application/json;charset=utf-8"
+  );
+  backupStatus.textContent="Complete JSON backup downloaded: "+snapshot.totalSavedSubmissions+" saved submission(s).";
+ }catch(err){
+  backupStatus.textContent="Backup failed: "+err.message;
+ }finally{
+  downloadJsonBackupBtn.disabled=false;
+  downloadTxtBackupBtn.disabled=false;
+ }
+});
+
+downloadTxtBackupBtn.addEventListener("click",async()=>{
+ downloadJsonBackupBtn.disabled=true;
+ downloadTxtBackupBtn.disabled=true;
+ backupStatus.textContent="Refreshing Firebase data…";
+ try{
+  await refreshCounts();
+  const snapshot=makeBackupSnapshot();
+  downloadTextFile(
+   "lima_bean_readable_backup_"+timestampForFilename()+".txt",
+   makeReadableBackup(snapshot)
+  );
+  backupStatus.textContent="Readable TXT backup downloaded: "+snapshot.totalSavedSubmissions+" saved submission(s).";
+ }catch(err){
+  backupStatus.textContent="Backup failed: "+err.message;
+ }finally{
+  downloadJsonBackupBtn.disabled=false;
+  downloadTxtBackupBtn.disabled=false;
+ }
+});
 
 downloadGroupChartBtn.addEventListener("click",async()=>{
  const g=Number(graphGroupSelect.value);
