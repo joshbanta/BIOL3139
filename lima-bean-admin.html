@@ -518,11 +518,12 @@ async function refreshCounts(){
   if(counts.has(g))counts.set(g,counts.get(g)+1);
  }
 
- let html="<table><thead><tr><th>Group</th><th>Saved submissions</th></tr></thead><tbody>";
+ let html="<table><thead><tr><th>Group</th><th>Saved submissions</th><th>Anonymous nicknames</th></tr></thead><tbody>";
  for(const g of ALL_GROUPS){
-  html+="<tr><td>Group "+g+"</td><td>"+counts.get(g)+"</td></tr>";
+  const nicknames=cachedDocs.filter(d=>Number(d.group)===g).map(d=>String(d.nickname||"").trim()||"(missing nickname)").sort((a,b)=>a.localeCompare(b));
+  html+="<tr><td>Group "+g+"</td><td>"+counts.get(g)+"</td><td>"+(nicknames.length?nicknames.map(escapeHtml).join("<br>"):"—")+"</td></tr>";
  }
- html+="<tr><th>Total</th><th>"+cachedDocs.length+"</th></tr></tbody></table>";
+ html+="<tr><th>Total</th><th>"+cachedDocs.length+"</th><th>—</th></tr></tbody></table>";
  countsOutput.innerHTML=html;
  updateSelectedCount();
  renderGraphs();
