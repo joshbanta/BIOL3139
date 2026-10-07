@@ -610,7 +610,7 @@ function renderGroups(states){
  const active=states.filter(s=>s.rows.length);
  if(!active.length){groupSummaryEl.textContent="No submissions yet.";return}
 
- let h="<table><thead><tr><th>Group</th><th>Anonymous nickname</th><th>Submissions</th><th>Status</th></tr></thead><tbody>";
+ let h="<table><thead><tr><th>Group</th><th>Submissions</th><th>Status</th></tr></thead><tbody>";
 
  active.forEach(s=>{
   let status="";
@@ -630,7 +630,7 @@ function renderGroups(states){
    ?s.rows.length+" submitted"
    :s.rows.length+"/"+s.expectedMembers;
 
-  h+="<tr><td>Group "+s.group+"</td><td>"+names+"</td><td>"+submissionCount+"</td><td>"+status+"</td></tr>";
+  h+="<tr><td>Group "+s.group+"</td><td>"+submissionCount+"</td><td>"+status+"</td></tr>";
  });
 
  groupSummaryEl.innerHTML=h+"</tbody></table>";
